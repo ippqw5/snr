@@ -1,0 +1,37 @@
+{
+    "version": 3,
+    "cmakeMinimumRequired": {
+        "major": 3,
+        "minor": 25,
+        "patch": 0
+    },
+    "configurePresets": [
+        {
+            "name": "base",
+            "hidden": true,
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build",
+            "condition": {
+                "type": "notEquals",
+                "lhs": "$env{VULKAN_SDK}",
+                "rhs": ""
+            }
+        },
+        {
+            "name": "default",
+            "inherits": "base",
+            "description": "SNR with Vulkan SDK Slang(default)",
+            "cacheVariables": {
+                "slang_DIR": "$env{VULKAN_SDK}/lib/cmake/slang"
+            }
+        },
+        {
+            "name": "slang-source-build",
+            "description": "SNR with Slang source build",
+            "inherits": "base",
+            "cacheVariables": {
+                "slang_DIR": "${sourceDir}/../slang/build-snr/Release/install/lib/cmake/slang"
+            }
+        }
+    ]
+}

@@ -1,0 +1,16 @@
+[submodule "external/cgltf"]
+	path = external/cgltf
+	url = https://github.com/jkuhlmann/cgltf.git
+[submodule "external/gltf-sample-assets"]
+	path = external/gltf-sample-assets
+	url = https://github.com/KhronosGroup/glTF-Sample-Assets.git
+    shallow = true
+[submodule "external/glm"]
+	path = external/glm
+	url = https://github.com/g-truc/glm.git
+[submodule "external/stb"]
+	path = external/stb
+	url = https://github.com/nothings/stb.git
+[submodule "external/slang-rhi"]
+	path = external/slang-rhi
+	url = https://github.com/shader-slang/slang-rhi.git
