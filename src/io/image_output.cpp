@@ -1,5 +1,6 @@
 #include "./image_output.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdio>

@@ -24,7 +24,7 @@ add_library(snr STATIC
     src/io/image_output.cpp
 )
 target_include_directories(snr PUBLIC src)
-target_include_directories(snr PRIVATE external/cgltf)
+target_include_directories(snr PRIVATE external/tinygltf)
 target_include_directories(snr SYSTEM PRIVATE external/stb)
 target_link_libraries(snr PUBLIC
     slang-rhi
@@ -34,10 +34,10 @@ target_link_libraries(snr PUBLIC
 )
 target_compile_options(snr PRIVATE -Wall -Wextra -Wpedantic)
 
-add_executable(main src/main.cpp)
-target_link_libraries(main PRIVATE snr)
-target_compile_definitions(main PRIVATE
+add_executable(pathtracer src/main.cpp)
+target_link_libraries(pathtracer PRIVATE snr)
+target_compile_definitions(pathtracer PRIVATE
     SNR_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/shaders"
     SNR_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/external/gltf-sample-assets/Models"
 )
-target_compile_options(main PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_options(pathtracer PRIVATE -Wall -Wextra -Wpedantic)

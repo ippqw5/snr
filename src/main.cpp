@@ -125,7 +125,7 @@ int main(int argc, char** argv)
                 options.spp = integer(i, 1, 1000);
             else if (arg == "--max-bounces")
                 options.maxBounces = integer(i, 1, 64);
-            else if (arg == "output")
+            else if (arg == "--output")
                 options.output = next(i);
             else
                 throw std::runtime_error("Unknown option: " + arg);

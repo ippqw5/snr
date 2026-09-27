@@ -2,3 +2,4 @@
 /output/
 /CMakeUserPresets.json
 __pycache__/
+.cache/

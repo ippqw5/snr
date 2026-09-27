@@ -113,7 +113,7 @@ void traceMain(uint3 tid : SV_DispatchThreadID)
 
     uint pixel = tid.y * params.image.x + tid.x;
     float4 sum = params.image.z == 0 ? float4(0) : film[pixel];
-    for (uint i = 0; i < params.image.z; ++i)
+    for (uint i = 0; i < params.image.w; ++i)
     {
         uint sampleIndex = params.image.z + i;
         uint rng = hash32(pixel ^ hash32(sampleIndex ^ hash32(params.integrator.y)));
