@@ -4,6 +4,9 @@
 #include <filesystem>
 #include <glm/glm.hpp>
 
+namespace snr
+{
+
 struct ImageSize
 {
     uint32_t width = 800, height = 800;
@@ -48,3 +51,5 @@ struct OutputSettings
 // void validateIntegrator(glm::vec3 environment);
 // void validateSampling(uint32_t targetSamples, uint32_t batchSize);
 // void validateDisplay(const DisplaySettings& display);
+
+} // namespace snr

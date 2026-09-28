@@ -5,6 +5,8 @@
 #include <slang-rhi/acceleration-structure-utils.h>
 #include <stdexcept>
 
+namespace snr
+{
 using namespace rhi;
 
 static ComPtr<IAccelerationStructure> buildAS(
@@ -138,3 +140,4 @@ void GpuScene::bind(const ShaderCursor& root) const
     checkRhi(root["lights"].setBinding(m_lights), "bind lights");
     checkRhi(root["texels"].setBinding(m_texels), "bind texels");
 }
+} // namespace snr

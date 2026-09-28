@@ -12,11 +12,14 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include <stb_image_write.h>
 
+namespace snr
+{
+
 namespace fs = std::filesystem;
 
 void saveImages(const OutputSettings& options, const RenderResult& result)
 {
-    size_t count = size_t(result.imageSize.width) * size_t(result.imageSize.height);
+    size_t count = size_t(result.image.width) * size_t(result.image.height);
 
     if (result.samples == 0 || result.sums.size() != count || result.display.size() != count)
     {
@@ -67,11 +70,11 @@ void saveImages(const OutputSettings& options, const RenderResult& result)
     auto png = output;
     if (!stbi_write_png(
             png.c_str(),
-            result.imageSize.width,
-            result.imageSize.height,
+            result.image.width,
+            result.image.height,
             4,
             rgba.data(),
-            result.imageSize.width * 4
+            result.image.width * 4
         ))
     {
         throw std::runtime_error("Failed to write PNG: " + png.string());
@@ -81,8 +84,8 @@ void saveImages(const OutputSettings& options, const RenderResult& result)
     hdr.replace_extension(".hdr");
     if (!stbi_write_hdr(
             hdr.c_str(),
-            result.imageSize.width,
-            result.imageSize.height,
+            result.image.width,
+            result.image.height,
             3,
             linear.data()
         ))
@@ -98,3 +101,4 @@ void saveImages(const OutputSettings& options, const RenderResult& result)
         hdr.c_str()
     );
 }
+} // namespace snr

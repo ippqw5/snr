@@ -7,7 +7,7 @@ function(snr_require_submodule name file)
     endif()
 endfunction()
 
-snr_require_submodule(cgltf cgltf.h)
+snr_require_submodule(tinygltf tiny_gltf.h)
 snr_require_submodule(glm glm/glm.hpp)
 snr_require_submodule(stb stb_image.h)
 snr_require_submodule(slang-rhi CMakeLists.txt)

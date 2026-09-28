@@ -5,6 +5,9 @@
 #include <slang-rhi.h>
 #include <stdexcept>
 
+namespace snr
+{
+
 using namespace rhi;
 
 Film::Film(DeviceContext& context, ImageSize size)
@@ -49,7 +52,7 @@ RenderResult Film::readback() const
 
     size_t       pixelCount = size_t(m_size.width) * size_t(m_size.height);
     RenderResult result;
-    result.imageSize = m_size;
+    result.image = m_size;
     result.samples = m_samples;
     result.sums.resize(pixelCount);
     result.display.resize(pixelCount);
@@ -65,3 +68,4 @@ RenderResult Film::readback() const
     );
     return result;
 }
+} // namespace snr

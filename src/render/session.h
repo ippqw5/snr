@@ -10,6 +10,10 @@
 
 #include <memory>
 
+namespace snr
+{
+// A synchronous, single-threaded render session. The library's device context
+// must outlive the session. Shader pipelines are retained after construction.
 class RenderSession
 {
 public:
@@ -46,3 +50,4 @@ private:
     Film                               m_film;
     rhi::ComPtr<rhi::IComputePipeline> m_trace, m_tonemap;
 };
+} // namespace snr

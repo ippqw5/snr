@@ -11,18 +11,8 @@ find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
 include(cmake/Dependencies.cmake)
 
-# file(GLOB_RECURSE SNR_SOURCES CONFIGURE_DEPENDS src/*.cpp)
-add_library(snr STATIC
-    src/scene/scene.cpp
-    src/render/renderer.cpp
-    src/gpu/device.cpp
-    src/gpu/shader_library.cpp
-    src/scene/gpu_scene.cpp
-    src/render/settings.cpp
-    src/render/film.cpp
-    src/render/session.cpp
-    src/io/image_output.cpp
-)
+file(GLOB_RECURSE SNR_SOURCES CONFIGURE_DEPENDS src/*.cpp)
+add_library(snr STATIC ${SNR_SOURCES})
 target_include_directories(snr PUBLIC src)
 target_include_directories(snr PRIVATE external/tinygltf)
 target_include_directories(snr SYSTEM PRIVATE external/stb)
@@ -34,7 +24,7 @@ target_link_libraries(snr PUBLIC
 )
 target_compile_options(snr PRIVATE -Wall -Wextra -Wpedantic)
 
-add_executable(pathtracer src/main.cpp)
+add_executable(pathtracer main.cpp)
 target_link_libraries(pathtracer PRIVATE snr)
 target_compile_definitions(pathtracer PRIVATE
     SNR_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/shaders"

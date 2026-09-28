@@ -1,9 +1,14 @@
 #include "./session.h"
+#include "gpu/device.h"
+#include "slang-rhi.h"
+#include "slang-rhi/shader-cursor.h"
 
 #include <cstdio>
 #include <memory>
 #include <stdexcept>
 
+namespace snr
+{
 struct Params
 {
     glm::uvec4 image, integrator;
@@ -11,17 +16,42 @@ struct Params
 };
 static_assert(sizeof(Params) == 112);
 
-static void bindParams(const rhi::ShaderCursor& root, const Params& params)
+void bindParams(const rhi::ShaderCursor& cursor, const Params& params)
 {
     rhi::ShaderCursor constants;
 
-    checkRhi(root["params"].getDereferenced(constants), "dereference paramter buffer");
+    checkRhi(cursor["params"].getDereferenced(constants), "dereference paramter buffer");
     if (!constants.isValid() || constants.getTypeLayout()->getSize() != sizeof(params))
     {
         throw std::runtime_error("Host/Slang paramter layout dismatch");
     }
 
     checkRhi(constants.setData(&params, sizeof(params)), "bind parameters");
+}
+
+template <typename BindResources>
+void dispatchImage(
+    DeviceContext&         context,
+    rhi::IComputePipeline* pipeline,
+    const Params&          params,
+    BindResources          bindResources
+)
+{
+    auto encoder = context.createEncoder();
+    encoder->globalBarrier();
+    auto* pass = encoder->beginComputePass();
+    if (!pass)
+        throw std::runtime_error("begin compute pass failed");
+    auto* root = pass->bindPipeline(pipeline);
+    if (!root)
+        throw std::runtime_error("bind compute pipeline failed");
+    rhi::ShaderCursor cursor(root);
+    bindParams(cursor, params);
+    bindResources(cursor);
+    pass->dispatchCompute((params.image.x + 7) / 8, (params.image.y + 7) / 8, 1);
+    pass->end();
+    encoder->globalBarrier();
+    context.submitAndWait(encoder);
 }
 
 static Params makeParams(
@@ -118,34 +148,10 @@ void RenderSession::renderTo(uint32_t targetSamples, uint32_t batchSize)
     {
         params.image.z = samples();
         params.image.w = std::min(batchSize, targetSamples - samples());
-        auto encoder = m_context.createEncoder();
-        encoder->globalBarrier();
-
-        auto* pass = encoder->beginComputePass();
-        if (!pass)
-        {
-            throw std::runtime_error("begin compute pass failed");
-        }
-
-        auto* root = pass->bindPipeline(m_trace);
-        if (!root)
-        {
-            throw std::runtime_error("bind trace pipeline failed");
-        }
-
-        rhi::ShaderCursor cursor(root);
-        bindParams(cursor, params);
-        m_scene->bind(cursor);
-
-        checkRhi(cursor["film"].setBinding(m_film.accumulation()), "bind film");
-        pass->dispatchCompute(
-            (m_settings.imageSize.width + 7) / 8,
-            (m_settings.imageSize.height + 7) / 8,
-            1
-        );
-        pass->end();
-
-        m_context.submitAndWait(encoder);
+        dispatchImage(m_context, m_trace, params, [&](const rhi::ShaderCursor& cursor) {
+            m_scene->bind(cursor);
+            checkRhi(cursor["film"].setBinding(m_film.accumulation()), "bind film");
+        });
         m_film.addSamples(params.image.w);
         std::printf("\rSamples: %u/%u", samples(), targetSamples);
         std::fflush(stdout);
@@ -161,36 +167,14 @@ RenderResult RenderSession::readback(const DisplaySettings& display)
     }
 
     Params params = makeParams(m_settings, m_environment, m_scene->lightCount(), display);
-    auto   encoder = m_context.createEncoder();
-    encoder->globalBarrier();
 
-    auto* pass = encoder->beginComputePass();
-    if (!pass)
-    {
-        throw std::runtime_error("begin compute pass failed");
-    }
-
-    auto* root = pass->bindPipeline(m_tonemap);
-    if (!root)
-    {
-        throw std::runtime_error("bind trace pipeline failed");
-    }
-
-    rhi::ShaderCursor cursor(root);
-    bindParams(cursor, params);
-    checkRhi(cursor["film"].setBinding(m_film.accumulation()), "bind tonemap film");
-    checkRhi(cursor["display"].setBinding(m_film.display()), "bind display buffer");
-
-    pass->dispatchCompute(
-        (m_settings.imageSize.width + 7) / 8,
-        (m_settings.imageSize.height + 7) / 8,
-        1
-    );
-    pass->end();
-    encoder->globalBarrier();
-    m_context.submitAndWait(encoder);
+    dispatchImage(m_context, m_tonemap, params, [&](const rhi::ShaderCursor& cursor) {
+        checkRhi(cursor["film"].setBinding(m_film.accumulation()), "bind tonemap film");
+        checkRhi(cursor["display"].setBinding(m_film.display()), "bind display buffer");
+    });
 
     auto result = m_film.readback();
     m_context.checkValidation();
     return result;
 }
+} // namespace snr

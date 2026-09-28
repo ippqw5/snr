@@ -3,15 +3,20 @@
 #include "../scene/scene.h"
 #include "./settings.h"
 
+namespace snr
+{
+// One-shot rendering uses the same settings as a reusable RenderSession.
 struct RenderOptions
 {
-    uint32_t              width = 800, height = 800, spp = 256, maxBounces = 12;
-    uint32_t              seed = 1, batchSize = 16;
-    float                 exposure = 0;
-    bool                  nee = true, validation = false, writePfm = false;
-    std::filesystem::path output;
+    ImageSize             image;
+    IntegratorSettings    integrator;
+    DisplaySettings       display;
+    OutputSettings        output;
+    uint32_t              spp = 256, batchSize = 16;
+    bool                  validation = false;
     std::filesystem::path shaderDir;
 };
 
 CameraSettings cameraFromScene(const Scene& scene);
 void           render(const Scene& scene, const RenderOptions& options);
+} // namespace snr

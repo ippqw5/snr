@@ -6,6 +6,9 @@
 
 #include <slang-rhi.h>
 
+namespace snr
+{
+
 class Film
 {
 public:
@@ -48,3 +51,5 @@ private:
     ImageSize                 m_size{0, 0};
     rhi::ComPtr<rhi::IBuffer> m_accumulation, m_display;
 };
+
+} // namespace snr

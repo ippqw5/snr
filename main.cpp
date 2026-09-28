@@ -1,3 +1,4 @@
+#include "io/gltf/gltf_loader.h"
 #include "render/renderer.h"
 #include "scene/scene.h"
 
@@ -8,13 +9,17 @@
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
+#include <map>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <system_error>
 
+namespace
+{
 namespace fs = std::filesystem;
 
-static fs::path findModel(const fs::path& assetDir, const std::string& name)
+fs::path findModel(const fs::path& assetDir, const std::string& name)
 {
     if (fs::is_regular_file(name))
         return fs::canonical(name);
@@ -34,7 +39,7 @@ static fs::path findModel(const fs::path& assetDir, const std::string& name)
     throw std::runtime_error("Model not available: " + name + ". Use --list-models, --asset-dir");
 }
 
-static void listModels(const fs::path& assetDir)
+void listModels(const fs::path& assetDir)
 {
     if (!fs::is_directory(assetDir))
         throw std::runtime_error("Asset directory not found: " + assetDir.string());
@@ -57,23 +62,44 @@ static void listModels(const fs::path& assetDir)
     }
 }
 
-static void usage()
+void usage()
 {
+    std::puts("snr: headless Vulkan/Slang path tracer\n"
+              "Usage: pathtracer [options]\n"
+              "  --output PATH.png        Required for rendering outputs\n"
+              "  --scene cornell|furnace  Built-in scenes\n"
+              "  --model NAME_OR_PATH     Khronos model name or ./gltf/.glb file\n"
+              "  --asset-dir PATH         Models directory for name lookup\n"
+              "  --list-models            List locally checked-out models\n"
+              "  --width N --height N --spp N --max-bounces N\n"
+              "  --seed N --batch-size N --exposure STOPS\n"
+              "  --camera X Y Z --target X Y Z --fov DEGREES\n"
+              "  --environment VALUE      Constant linear environment radiance\n"
+              "  --studio                 Add floor and area light to a gltf model\n"
+              "  --pfm                    Also write full-precision linear PATH.pfm\n"
+              "  --shader-dir PATH        defaults to the source shader directory\n"
+              "  --no-nee                 Disable area-light next-event estimation\n"
+              "  --validate               Enable RHI and Vulkan validation\n"
+              "  --inspect                Print scene Json without creating a GPU device\n"
+              "  --help");
 }
+
+} // namespace
 
 int main(int argc, char** argv)
 {
+    using namespace snr;
     try
     {
         RenderOptions options;
         options.shaderDir = SNR_SHADER_DIR;
-        std::string sceneName = "cornell";
-        fs::path    assetDir = SNR_ASSET_DIR;
-        bool        inspect = false, studio = false, hasCamera = false, hasTarget = false;
-        bool        list = false, sceneSpecified = false;
-        glm::vec3   eye(0), target(0);
-        float       fov = 0, environment = -1;
-        auto        next = [&](int& i) -> std::string {
+        std::string              sceneName = "cornell";
+        fs::path                 assetDir = SNR_ASSET_DIR;
+        bool                     inspect = false, studio = false;
+        bool                     list = false, sceneSpecified = false;
+        std::optional<glm::vec3> eye, target;
+        std::optional<float>     fov, environment;
+        auto                     next = [&](int& i) -> std::string {
             if (++i >= argc)
                 throw std::runtime_error("Missing option value");
             return argv[i];
@@ -118,15 +144,44 @@ int main(int argc, char** argv)
             else if (arg == "--list-models")
                 list = true;
             else if (arg == "--width")
-                options.width = integer(i, 1, 8192);
+                options.image.width = integer(i, 1, 8192);
             else if (arg == "--height")
-                options.height = integer(i, 1, 8192);
+                options.image.height = integer(i, 1, 8192);
             else if (arg == "--spp")
                 options.spp = integer(i, 1, 1000);
             else if (arg == "--max-bounces")
-                options.maxBounces = integer(i, 1, 64);
+                options.integrator.maxBounces = integer(i, 1, 64);
+            else if (arg == "--seed")
+                options.integrator.seed = integer(i, 1, UINT32_MAX);
+            else if (arg == "--batch-size")
+                options.batchSize = integer(i, 1, 256);
+            else if (arg == "--exposure")
+                options.display.exposure = real(i, -20, 20);
+            else if (arg == "--fov")
+                fov = real(i, 0, 150);
+            else if (arg == "--environment")
+                environment = real(i, 0, 10000);
             else if (arg == "--output")
-                options.output = next(i);
+                options.output.path = next(i);
+            else if (arg == "--shader-dir")
+                options.shaderDir = next(i);
+            else if (arg == "--studio")
+                studio = true;
+            else if (arg == "--inspect")
+                inspect = true;
+            else if (arg == "--validate")
+                options.validation = true;
+            else if (arg == "--pfm")
+                options.output.writePfm = true;
+            else if (arg == "--no-nee")
+                options.integrator.nee = false;
+            else if (arg == "--camera" || arg == "--target")
+            {
+                float x = real(i, -1e10f, 1e10f);
+                float y = real(i, -1e10f, 1e10f);
+                float z = real(i, -1e10f, 1e10f);
+                (arg == "--camera" ? eye : target) = vec3(x, y, z);
+            }
             else
                 throw std::runtime_error("Unknown option: " + arg);
         }
@@ -136,6 +191,13 @@ int main(int argc, char** argv)
             return 0;
         }
 
+        if (!inspect && options.output.path.empty())
+            throw std::runtime_error("--output PATH.png is required for rendering");
+        if (!options.output.path.empty() && options.output.path.extension() != ".png")
+            throw std::runtime_error("--output requires a .png extension");
+        if (studio && (sceneName == "cornell" || sceneName == "furnace"))
+            throw std::runtime_error("--studio requires a glTF scene");
+
         bool     builtIn = sceneName == "cornell" || sceneName == "furnace";
         fs::path modelPath;
         if (!builtIn)
@@ -143,6 +205,14 @@ int main(int argc, char** argv)
         Scene scene = sceneName == "cornell"   ? makeCornellBox()
                       : sceneName == "furnace" ? makeFurnaceScene()
                                                : loadGltf(modelPath);
+        if (studio)
+            addStudio(scene);
+
+        scene.eye = eye.value_or(scene.eye);
+        scene.target = target.value_or(scene.target);
+        scene.fov = fov.value_or(scene.fov);
+        if (environment)
+            scene.environment = vec3(*environment);
 
         render(scene, options);
         return 0;
