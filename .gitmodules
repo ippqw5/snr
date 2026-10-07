@@ -1,6 +1,7 @@
 [submodule "external/tinygltf"]
 	path = external/tinygltf
 	url = https://github.com/syoyo/tinygltf.git
+	branch = v2.9.7
 [submodule "external/gltf-sample-assets"]
 	path = external/gltf-sample-assets
 	url = https://github.com/KhronosGroup/glTF-Sample-Assets.git
