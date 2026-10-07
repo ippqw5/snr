@@ -29,8 +29,10 @@ ShaderLibrary::ShaderLibrary(DeviceContext& context, const std::filesystem::path
     std::fflush(stdout);
 
     ComPtr<slang::IBlob> diagnostics;
-    m_module =
-        context.device()->getSlangSession()->loadModule(path.c_str(), diagnostics.writeRef());
+    m_module = context.device()->getSlangSession()->loadModule(
+        path.string().c_str(),
+        diagnostics.writeRef()
+    );
 
     printDiagnostics(diagnostics);
     if (!m_module)

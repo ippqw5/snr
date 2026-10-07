@@ -15,6 +15,8 @@
 #include <string>
 #include <system_error>
 
+#define DEFAULT_OUTPUT_PATH "output/test.png"
+
 namespace
 {
 namespace fs = std::filesystem;
@@ -58,7 +60,11 @@ void listModels(const fs::path& assetDir)
         const auto binary = assetDir / name / "glTF-Binary" / (name + ".glb");
         const auto text = assetDir / name / "glTF" / (name + ".gltf");
         if (fs::is_regular_file(binary) || fs::is_regular_file(text))
-            std::printf("%s\t%s\n", name.c_str(), findModel(assetDir, name).c_str());
+            std::printf(
+                "%s\t%s\n",
+                name.c_str(),
+                findModel(assetDir, name).string().c_str()
+            );
     }
 }
 
@@ -66,7 +72,7 @@ void usage()
 {
     std::puts("snr: headless Vulkan/Slang path tracer\n"
               "Usage: pathtracer [options]\n"
-              "  --output PATH.png        Required for rendering outputs\n"
+              "  --output PATH.png        rendering output path\n"
               "  --scene cornell|furnace  Built-in scenes\n"
               "  --model NAME_OR_PATH     Khronos model name or ./gltf/.glb file\n"
               "  --asset-dir PATH         Models directory for name lookup\n"
@@ -93,6 +99,7 @@ int main(int argc, char** argv)
     {
         RenderOptions options;
         options.shaderDir = SNR_SHADER_DIR;
+        options.output.path = DEFAULT_OUTPUT_PATH;
         std::string              sceneName = "cornell";
         fs::path                 assetDir = SNR_ASSET_DIR;
         bool                     inspect = false, studio = false;
@@ -109,7 +116,7 @@ int main(int argc, char** argv)
             std::string value = next(i);
             uint32_t    result = 0;
             auto        parsed = std::from_chars(value.data(), value.data() + value.size(), result);
-            if (parsed.ec != std::errc() || parsed.ptr != value.data() + value.size() || result < minimum || result < maximum)
+            if (parsed.ec != std::errc() || parsed.ptr != value.data() + value.size() || result < minimum || result > maximum)
                 throw std::runtime_error("Integer option out of range: " + value);
             return result;
         };
@@ -191,8 +198,6 @@ int main(int argc, char** argv)
             return 0;
         }
 
-        if (!inspect && options.output.path.empty())
-            throw std::runtime_error("--output PATH.png is required for rendering");
         if (!options.output.path.empty() && options.output.path.extension() != ".png")
             throw std::runtime_error("--output requires a .png extension");
         if (studio && (sceneName == "cornell" || sceneName == "furnace"))

@@ -69,7 +69,7 @@ void saveImages(const OutputSettings& options, const RenderResult& result)
 
     auto png = output;
     if (!stbi_write_png(
-            png.c_str(),
+            png.string().c_str(),
             result.image.width,
             result.image.height,
             4,
@@ -83,7 +83,7 @@ void saveImages(const OutputSettings& options, const RenderResult& result)
     auto hdr = output;
     hdr.replace_extension(".hdr");
     if (!stbi_write_hdr(
-            hdr.c_str(),
+            hdr.string().c_str(),
             result.image.width,
             result.image.height,
             3,
@@ -94,11 +94,11 @@ void saveImages(const OutputSettings& options, const RenderResult& result)
     }
 
     std::printf(
-        "Linear RGB mean: %.6f; maximum: %.6f\n PNG: %s\nHDR: %s\n",
+        "Linear RGB mean: %.6f; maximum: %.6f\nPNG: %s\nHDR: %s\n",
         sum / (count * 3),
         maximum,
-        png.c_str(),
-        hdr.c_str()
+        png.string().c_str(),
+        hdr.string().c_str()
     );
 }
 } // namespace snr
