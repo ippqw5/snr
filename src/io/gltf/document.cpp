@@ -10,7 +10,7 @@
 
 #include <algorithm>
 
-namespace snr::gltf
+namespace snr
 {
 namespace fs = std::filesystem;
 
@@ -97,4 +97,4 @@ tinygltf::Model readDocument(const std::filesystem::path& input, std::vector<std
     }
     return model;
 }
-} // namespace snr::gltf
+} // namespace snr

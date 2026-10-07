@@ -10,7 +10,7 @@
 #include <span>
 #include <stdexcept>
 
-namespace snr::gltf
+namespace snr
 {
 static_assert(std::endian::native == std::endian::little);
 
@@ -190,4 +190,4 @@ std::vector<uint32_t> readIndices(const tinygltf::Model& model, int index, size_
     }
     return indices;
 }
-} // namespace snr::gltf
+} // namespace snr

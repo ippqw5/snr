@@ -6,7 +6,7 @@
 
 namespace snr
 {
-static void require(bool condition, const std::string& message)
+inline void require(bool condition, const std::string& message)
 {
     if (!condition)
         throw std::runtime_error(message);

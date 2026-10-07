@@ -2,7 +2,9 @@
 
 #include "./common.h"
 
-namespace snr::gltf
+#include <array>
+
+namespace snr
 {
 
 struct TextureCoordinates
@@ -26,4 +28,4 @@ struct ImportedMaterials
 };
 
 ImportedMaterials importMaterials(const tinygltf::Model& model, Scene& scene);
-} // namespace snr::gltf
+} // namespace snr

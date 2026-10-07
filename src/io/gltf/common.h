@@ -6,7 +6,7 @@
 #include <stdexcept>
 #include <tiny_gltf.h>
 
-namespace snr::gltf
+namespace snr
 {
 
 constexpr size_t maxTexturePixel = 16 * 1024 * 1024;
@@ -38,4 +38,4 @@ inline float number(const tinygltf::Value& value, const char* description)
     return result;
 }
 
-} // namespace snr::gltf
+} // namespace snr

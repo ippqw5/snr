@@ -1,8 +1,11 @@
+import bsdf;
+
 struct Triangle
 {
     float4 p0, p1, p2;
     float4 n0, n1, n2;
     float4 uv01, uv2;
+    float4 mrUv01, mrUv02;
     uint4 info;
 };
 
@@ -12,6 +15,9 @@ struct Material
     float4 emission;
     int4 textureInfo;
     uint4 settings;
+    float4 pbr;
+    int4 mrTextureInfo;
+    uint4 mrSettings;
 };
 
 struct Params
@@ -85,30 +91,80 @@ int wrapTexel(int x, int size, uint mode)
     return mode == 33648 && x >= size ? period - x - 1 : x;
 }
 
-float3 fetchTexel(Material m, int2 p)
+float3 fetchTexel(int4 textureInfo, uint2 wrap, int2 p)
 {
-    int x = wrapTexel(p.x, m.textureInfo.y, m.settings.x);
-    int y = wrapTexel(p.y, m.textureInfo.z, m.settings.y);
-    return texels[m.textureInfo.x + y * m.textureInfo.y + x].rgb;
+    int x = wrapTexel(p.x, textureInfo.y, textureInfo.w);
+    int y = wrapTexel(p.y, textureInfo.z, textureInfo.w);
+    return texels[textureInfo.x + y * textureInfo.y + x].rgb;
 }
 
-float3 baseColorAt(Triangle triangle, Material material, float2 bary)
+float wrapCoordinate(float uv, uint mode)
 {
-    float3 color = material.baseColor.rgb;
-    if (material.textureInfo.x < 0)
-        return color;
-    float2 uv = triangle.uv01.xy * (1 - bary.x - bary.y) + triangle.uv01.zw * bary.x
-                + triangle.uv2.xy * bary.y;
+    if (mode == 33071)
+        return saturate(uv);
+    return mode == 33648 ? 1 - abs(frac(uv * 0.5) * 2 - 1) : frac(uv);
+}
 
-    float2 p = uv * float2(material.textureInfo.yz);
-    if (material.textureInfo.w == 1) return color * fetchTexel(material, int2(p));
+float3 sampleTexture(int4 textureInfo, uint2 wrap, float4 uv01, float4 uv2, float2 bary)
+{
+    if (textureInfo.x < 0)
+        return 1;
+    float2 uv = uv01.xy * (1 - bary.x - bary.y) + uv01.zw * bary.x + uv2.xy * bary.y;
+    uv = float2(wrapCoordinate(uv.x, wrap.x), wrapCoordinate(uv.y, wrap.y));
+    float2 p = uv * float2(textureInfo.yz);
+    if (textureInfo.w == 1)
+        return fetchTexel(textureInfo, wrap, int2(floor(p)));
+
     p -= 0.5;
     int2 lo = int2(floor(p));
     float2 f = frac(p);
-    return color * lerp(
-        lerp(fetchTexel(material, lo), fetchTexel(material, lo + int2(1, 0)), f.x),
-        lerp(fetchTexel(material, lo + int2(0, 1)), fetchTexel(material, lo + int2(1, 1)), f.x),
-        f.y);
+    return lerp(lerp(fetchTexel(textureInfo, wrap, lo),
+                    fetchTexel(textureInfo, wrap, lo + int2(1, 0)), f.x),
+                lerp(fetchTexel(textureInfo, wrap, lo + int2(0, 1)),
+                    fetchTexel(textureInfo, wrap, lo + int2(1, 1)), f.x), f.y);
+}
+
+SurfaceMaterial materialAt(Triangle triangle, Material material, float2 bary)
+{
+    SurfaceMaterial result = {};
+    result.baseColor = material.baseColor.rgb * sampleTexture(material.textureInfo,
+        material.settings.xy, triangle.uv01, triangle.uv2, bary);
+    
+    float3 mr = sampleTexture(material.mrTextureInfo, material.mrSettings.xy, triangle.mrUv01, triangle.mrUv02, bary);
+    result.metallic = saturate(material.pbr.x * mr.b);
+    result.roughness = saturate(material.pbr.y * mr.g);
+    result.diffuseOnly = material.settings.w == 0;
+    return result;
+}
+
+struct SurfaceInteraction
+{
+    float3 position;
+    float3 geometricNormal;
+    float3 normal;
+    SurfaceMaterial material;
+};
+
+SurfaceInteraction surfaceAt(Triangle triangle, Material material, float2 bary, float3 wo)
+{
+    SurfaceInteraction surface = {};
+    surface.position = triangle.p0.xyz * (1 - bary.x - bary.y) + triangle.p1.xyz * bary.x + triangle.p2.xyz * bary.y;
+
+    float3 ng = geometricNormal(triangle);
+    float3 normal = triangle.n0.xyz * (1 - bary.x - bary.y) + triangle.n1.xyz * bary.x + triangle.n2.xyz * bary.y;
+    normal = dot(normal, normal) > 1e-12 ? normalize(normal) : ng;
+    if (dot(normal, ng) < 0)
+        normal = -normal;
+    if (dot(ng, wo) < 0)
+    {
+        ng = -ng;
+        normal = -normal;
+    }
+
+    surface.geometricNormal = ng;
+    surface.normal = dot(normal, wo) > 0 ? normal : ng;
+    surface.material = materialAt(triangle, material, bary);
+    return surface;
 }
 
 float lightPdf(Triangle light, float3 from, float3 to)

@@ -2,7 +2,7 @@
 
 #include "./materials.h"
 
-namespace snr::gltf
+namespace snr
 {
-void importGeomtry(const tinygltf::Model& mdel, const ImportedMaterials& materials, Scene& scene);
+void importGeomtry(const tinygltf::Model& model, const ImportedMaterials& materials, Scene& scene);
 }

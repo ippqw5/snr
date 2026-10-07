@@ -1,5 +1,6 @@
 import sampling;
 import scene;
+import bsdf;
 
 RWStructuredBuffer<float4> film;
 RWStructuredBuffer<float4> display;
@@ -23,22 +24,11 @@ float3 tracePath(float3 origin, float3 direction, inout uint rng)
 
         Triangle triangle = triangles[hit.primitive];
         Material material = materials[triangle.info.x];
-        float3 position = triangle.p0.xyz * (1 - hit.bary.x - hit.bary.y) + triangle.p1.xyz * hit.bary.x + triangle.p2.xyz * hit.bary.y;
-
-        float3 ng = geometricNormal(triangle);
-        float3 normal = normalize(triangle.n0.xyz * (1 - hit.bary.x - hit.bary.y) + triangle.n1.xyz * hit.bary.x + triangle.n2.xyz * hit.bary.y);
-        
-        if (dot(normal, ng) < 0)
-            normal = -normal;
-        if (dot(ng, direction) > 0)
-        {
-            ng = -ng;
-            normal = -normal;
-        }
-        if (dot(normal, direction) > 0)
-            normal = ng;
-
-        float3 albedo = baseColorAt(triangle, material, hit.bary);
+        float3 wo = -direction;
+        SurfaceInteraction surface = surfaceAt(triangle, material,hit.bary, wo);
+        float3 position = surface.position;
+        float3 ng = surface.geometricNormal;
+        float3 normal = surface.normal;
 
         float emissionWeight = 1;
         if (previousUseNee && triangle.info.y != 0xffffffff)
@@ -74,23 +64,20 @@ float3 tracePath(float3 origin, float3 direction, inout uint rng)
                 Hit shadowHit;
                 if (distance > 0 && !traceScene(shadowOrigin, shadowDelta / distance, distance - 1e-4, true, shadowHit))
                 {
-                    float weight = powerHeuristic(pdf, cosine / kPi);
-                    radiance += throughput * albedo / kPi * materials[light.info.x].emission.rgb * weight * cosine / pdf;
+                    BsdfEvaluation bsdf = evaluateBsdf(surface.material, normal, wo, wi);
+                    float weight = powerHeuristic(pdf, bsdf.pdf);
+                    radiance += throughput * bsdf.value * materials[light.info.x].emission.rgb * cosine * weight / pdf;
                 }
             }
         }
-
-        if (max(albedo.r, max(albedo.g, albedo.b)) <= 0)
+        BsdfSample sample = sampleBsdf(surface.material, normal, wo, rng);
+        direction = sample.direction;
+        if (dot(direction, ng) <= 0 || max(sample.weight.r, max(sample.weight.g, sample.weight.b)) <= 0)
             break;
-
-        direction = cosineHemisphere(normal, rng);
-        if (dot(direction, ng) < 0)
-            break;
-
-        throughput *= albedo;
-        previousPdf = max(0.0, dot(normal, direction)) / kPi;
+        throughput *= sample.weight;
+        previousPdf = sample.pdf;
         previousPosition = position;
-        previousUseNee = useNee;
+        previousUseNee = useNee && !sample.delta;
         origin = offsetRay(position, ng);
 
         if (bounce >= 3)
