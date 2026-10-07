@@ -6,6 +6,32 @@ struct Triangle
     float4 n0, n1, n2;
     float4 uv01, uv2;
     float4 mrUv01, mrUv02;
+};
+
+struct Primitive
+{
+    uint firstTriangle;
+    uint triangleCount;
+    uint material;
+    uint reserved;
+};
+
+// Places a primitive in the world. The rows are explicit so the host and shader agree on
+// layout without depending on either side's matrix convention.
+struct Instance
+{
+    float4 transformRows[3];
+    float4 normalRows[3];
+    uint primitive;
+    uint material;
+    uint lightBase;
+    uint flags;
+};
+
+// A world-space emissive triangle used for next-event estimation.
+struct Light
+{
+    float4 p0, p1, p2;
     uint4 info;
 };
 
@@ -31,23 +57,56 @@ struct Params
     float4 environment;
 };
 
+// A committed hit, resolved to the instance that produced it.
 struct Hit
 {
     float t;
+    uint instance;
     uint primitive;
     float2 bary;
 };
 
 RaytracingAccelerationStructure sceneBVH;
 StructuredBuffer<Triangle> triangles;
+StructuredBuffer<Primitive> primitives;
+StructuredBuffer<Instance> instances;
 StructuredBuffer<Material> materials;
-StructuredBuffer<uint> lights;
+StructuredBuffer<Light> lights;
 StructuredBuffer<float4> texels;
 ConstantBuffer<Params> params;
 
-float3 geometricNormal(Triangle t)
+float3 transformPoint(Instance instance, float3 point)
 {
-    return normalize(cross(t.p1.xyz - t.p0.xyz, t.p2.xyz - t.p0.xyz));
+    return float3(dot(instance.transformRows[0].xyz, point) + instance.transformRows[0].w,
+                  dot(instance.transformRows[1].xyz, point) + instance.transformRows[1].w,
+                  dot(instance.transformRows[2].xyz, point) + instance.transformRows[2].w);
+}
+
+float3 transformNormal(Instance instance, float3 normal)
+{
+    return float3(dot(instance.normalRows[0].xyz, normal),
+                  dot(instance.normalRows[1].xyz, normal),
+                  dot(instance.normalRows[2].xyz, normal));
+}
+
+Triangle triangleAt(Instance instance, uint localTriangle)
+{
+    return triangles[primitives[instance.primitive].firstTriangle + localTriangle];
+}
+
+// World-space normal taken from the transformed edges, so mirrored instances still face correctly.
+float3 geometricNormal(Instance instance, Triangle triangle)
+{
+    float3 a = transformPoint(instance, triangle.p0.xyz);
+    float3 b = transformPoint(instance, triangle.p1.xyz);
+    float3 c = transformPoint(instance, triangle.p2.xyz);
+    return normalize(cross(b - a, c - a));
+}
+
+// Index of the world-space light a hit emitted from, or -1 when it is not an emitter.
+int lightIndexOf(Instance instance, uint localTriangle)
+{
+    return instance.lightBase == 0xffffffffu ? -1 : int(instance.lightBase + localTriangle);
 }
 
 bool traceScene(float3 origin, float3 direction, float tMax, bool anyHit, out Hit hit)
@@ -65,10 +124,11 @@ bool traceScene(float3 origin, float3 direction, float tMax, bool anyHit, out Hi
     {
         if (query.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE)
         {
-            Triangle triangle = triangles[query.CandidatePrimitiveIndex()];
-            Material material = materials[triangle.info.x];
+            Instance instance = instances[query.CandidateInstanceID()];
+            Material material = materials[instance.material];
+            Triangle triangle = triangleAt(instance, query.CandidatePrimitiveIndex());
 
-            if (material.settings.z != 0 || dot(geometricNormal(triangle), direction) < 0)
+            if (material.settings.z != 0 || dot(geometricNormal(instance, triangle), direction) < 0)
                 query.CommitNonOpaqueTriangleHit();
         }
     }
@@ -77,6 +137,7 @@ bool traceScene(float3 origin, float3 direction, float tMax, bool anyHit, out Hi
         return false;
 
     hit.t = query.CommittedRayT();
+    hit.instance = query.CommittedInstanceID();
     hit.primitive = query.CommittedPrimitiveIndex();
     hit.bary = query.CommittedTriangleBarycentrics();
     return true;
@@ -93,8 +154,8 @@ int wrapTexel(int x, int size, uint mode)
 
 float3 fetchTexel(int4 textureInfo, uint2 wrap, int2 p)
 {
-    int x = wrapTexel(p.x, textureInfo.y, textureInfo.w);
-    int y = wrapTexel(p.y, textureInfo.z, textureInfo.w);
+    int x = wrapTexel(p.x, textureInfo.y, wrap.x);
+    int y = wrapTexel(p.y, textureInfo.z, wrap.y);
     return texels[textureInfo.x + y * textureInfo.y + x].rgb;
 }
 
@@ -129,7 +190,7 @@ SurfaceMaterial materialAt(Triangle triangle, Material material, float2 bary)
     SurfaceMaterial result = {};
     result.baseColor = material.baseColor.rgb * sampleTexture(material.textureInfo,
         material.settings.xy, triangle.uv01, triangle.uv2, bary);
-    
+
     float3 mr = sampleTexture(material.mrTextureInfo, material.mrSettings.xy, triangle.mrUv01, triangle.mrUv02, bary);
     result.metallic = saturate(material.pbr.x * mr.b);
     result.roughness = saturate(material.pbr.y * mr.g);
@@ -145,13 +206,18 @@ struct SurfaceInteraction
     SurfaceMaterial material;
 };
 
-SurfaceInteraction surfaceAt(Triangle triangle, Material material, float2 bary, float3 wo)
+SurfaceInteraction surfaceAt(Instance instance, Triangle triangle, Material material, float2 bary, float3 wo)
 {
     SurfaceInteraction surface = {};
-    surface.position = triangle.p0.xyz * (1 - bary.x - bary.y) + triangle.p1.xyz * bary.x + triangle.p2.xyz * bary.y;
 
-    float3 ng = geometricNormal(triangle);
-    float3 normal = triangle.n0.xyz * (1 - bary.x - bary.y) + triangle.n1.xyz * bary.x + triangle.n2.xyz * bary.y;
+    // Interpolating in object space and transforming once is equivalent to transforming the
+    // vertices, because the placement is affine.
+    float3 objectPosition = triangle.p0.xyz * (1 - bary.x - bary.y) + triangle.p1.xyz * bary.x + triangle.p2.xyz * bary.y;
+    surface.position = transformPoint(instance, objectPosition);
+
+    float3 ng = geometricNormal(instance, triangle);
+    float3 normal = transformNormal(instance,
+        triangle.n0.xyz * (1 - bary.x - bary.y) + triangle.n1.xyz * bary.x + triangle.n2.xyz * bary.y);
     normal = dot(normal, normal) > 1e-12 ? normalize(normal) : ng;
     if (dot(normal, ng) < 0)
         normal = -normal;
@@ -167,7 +233,7 @@ SurfaceInteraction surfaceAt(Triangle triangle, Material material, float2 bary, 
     return surface;
 }
 
-float lightPdf(Triangle light, float3 from, float3 to)
+float lightPdf(Light light, float3 from, float3 to)
 {
     float3 delta = to - from;
     float distanceSquared = dot(delta, delta);
@@ -181,4 +247,3 @@ float lightPdf(Triangle light, float3 from, float3 to)
 
     return distanceSquared / (cosine * 0.5f * twiceArea * params.integrator.z);
 }
-

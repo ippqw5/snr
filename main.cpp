@@ -1,4 +1,4 @@
-#include "io/gltf/gltf_loader.h"
+#include "io/gltf_scene.h"
 #include "render/renderer.h"
 #include "scene/scene.h"
 
@@ -207,9 +207,26 @@ int main(int argc, char** argv)
         fs::path modelPath;
         if (!builtIn)
             modelPath = findModel(assetDir, sceneName);
-        Scene scene = sceneName == "cornell"   ? makeCornellBox()
-                      : sceneName == "furnace" ? makeFurnaceScene()
-                                               : loadGltf(modelPath);
+
+        GltfScene gltf;
+        Scene     builtInScene;
+        if (builtIn)
+            builtInScene = sceneName == "cornell" ? makeCornellBox() : makeFurnaceScene();
+        else
+            gltf.load(modelPath);
+
+        // Warnings explain recoverable problems, and often why a load failed, so print them first.
+        for (const auto& warning : gltf.warnings())
+            std::fprintf(stderr, "Warning: %s\n", warning.c_str());
+
+        if (!builtIn && !gltf.loaded())
+        {
+            for (const auto& error : gltf.errors())
+                std::fprintf(stderr, "Error: %s\n", error.c_str());
+            return 1;
+        }
+
+        Scene& scene = builtIn ? builtInScene : gltf.scene();
         if (studio)
             addStudio(scene);
 

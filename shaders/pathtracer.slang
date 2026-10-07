@@ -22,29 +22,31 @@ float3 tracePath(float3 origin, float3 direction, inout uint rng)
             break;
         }
 
-        Triangle triangle = triangles[hit.primitive];
-        Material material = materials[triangle.info.x];
+        Instance instance = instances[hit.instance];
+        Triangle triangle = triangleAt(instance, hit.primitive);
+        Material material = materials[instance.material];
         float3 wo = -direction;
-        SurfaceInteraction surface = surfaceAt(triangle, material,hit.bary, wo);
+        SurfaceInteraction surface = surfaceAt(instance, triangle, material, hit.bary, wo);
         float3 position = surface.position;
         float3 ng = surface.geometricNormal;
         float3 normal = surface.normal;
 
+        int hitLight = lightIndexOf(instance, hit.primitive);
         float emissionWeight = 1;
-        if (previousUseNee && triangle.info.y != 0xffffffff)
+        if (previousUseNee && hitLight >= 0)
         {
-            emissionWeight = powerHeuristic(previousPdf, lightPdf(triangle, previousPosition, position));
+            emissionWeight = powerHeuristic(previousPdf, lightPdf(lights[uint(hitLight)], previousPosition, position));
         }
 
         radiance += throughput * material.emission.rgb * emissionWeight;
 
         if (bounce == params.integrator.x)
             break;
-        bool useNee = triangle.info.w != 0 && params.integrator.z != 0;
+        bool useNee = params.integrator.w != 0 && params.integrator.z != 0;
         if (useNee)
         {
-            uint lightIndex = min(uint(randomFloat(rng) * params.integrator.z), params.integrator.z - 1);
-            Triangle light = triangles[lights[lightIndex]];
+            uint sampledLight = min(uint(randomFloat(rng) * params.integrator.z), params.integrator.z - 1);
+            Light light = lights[sampledLight];
             float r = sqrt(randomFloat(rng));
             float v = randomFloat(rng);
             float3 lightPoint = light.p0.xyz * (1 - r) + light.p1.xyz * r * (1 - v) + light.p2.xyz * r * v;
@@ -53,10 +55,10 @@ float3 tracePath(float3 origin, float3 direction, inout uint rng)
             float pdf = lightPdf(light, position, lightPoint);
             if (pdf > 0 && cosine > 0 && dot(ng, wi) > 0)
             {
-                float3 lightNormal = geometricNormal(light);
+                float3 lightNormal = normalize(cross(light.p1.xyz - light.p0.xyz, light.p2.xyz - light.p0.xyz));
                 if (dot(lightNormal, -wi) < 0)
                     lightNormal = -lightNormal;
-            
+
                 float3 shadowOrigin = offsetRay(position, ng);
                 float3 shadowTarget = offsetRay(lightPoint, lightNormal);
                 float3 shadowDelta = shadowTarget - shadowOrigin;

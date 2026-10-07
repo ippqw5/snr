@@ -14,7 +14,8 @@ include(cmake/Dependencies.cmake)
 file(GLOB_RECURSE SNR_SOURCES CONFIGURE_DEPENDS src/*.cpp)
 add_library(snr STATIC ${SNR_SOURCES})
 target_include_directories(snr PUBLIC src)
-target_include_directories(snr PRIVATE external/tinygltf)
+# GltfScene exposes tinygltf::Model in its interface, so the dependency is public.
+target_include_directories(snr PUBLIC external/tinygltf)
 target_include_directories(snr SYSTEM PRIVATE external/stb)
 target_link_libraries(snr PUBLIC
     slang-rhi

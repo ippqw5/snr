@@ -1,16 +1,42 @@
 #include "./scene.h"
 
+#include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <limits>
-#include <stdexcept>
 
 namespace snr
 {
-inline void require(bool condition, const std::string& message)
+namespace
 {
-    if (!condition)
-        throw std::runtime_error(message);
+// The rows are stored explicitly, matching how the shader transforms a point.
+vec3 transformPoint(const vec4 rows[3], vec3 point)
+{
+    return vec3(
+        glm::dot(vec3(rows[0]), point) + rows[0].w,
+        glm::dot(vec3(rows[1]), point) + rows[1].w,
+        glm::dot(vec3(rows[2]), point) + rows[2].w
+    );
 }
+
+void setTransform(Instance& instance, const glm::mat4& transform)
+{
+    for (int row = 0; row < 3; ++row)
+    {
+        instance.transformRows[row] =
+            vec4(transform[0][row], transform[1][row], transform[2][row], transform[3][row]);
+    }
+
+    const glm::mat3 linear(transform);
+    // A singular transform has no inverse, so keep the linear part instead of producing infinities.
+    const glm::mat3 normal =
+        std::abs(glm::determinant(linear)) > 0.0f ? glm::transpose(glm::inverse(linear)) : linear;
+    for (int row = 0; row < 3; ++row)
+    {
+        instance.normalRows[row] = vec4(normal[0][row], normal[1][row], normal[2][row], 0.0f);
+    }
+}
+} // namespace
 
 uint32_t Scene::addMaterial(vec3 color, vec3 emission)
 {
@@ -23,15 +49,16 @@ uint32_t Scene::addMaterial(vec3 color, vec3 emission)
 
 void Scene::addTriangle(vec3 a, vec3 b, vec3 c, uint32_t material)
 {
-    vec3 normal = glm::cross(b - a, c - a);
-    normal = glm::normalize(normal);
+    const vec3 cross = glm::cross(b - a, c - a);
+    assert(glm::dot(cross, cross) > 0.0f);
+
     Triangle triangle = {};
     triangle.p0 = vec4(a, 0);
     triangle.p1 = vec4(b, 0);
     triangle.p2 = vec4(c, 0);
-    triangle.n0 = triangle.n1 = triangle.n2 = vec4(normal, 0);
-    triangle.info = uvec4(material, UINT32_MAX, 0, 0);
-    triangles.push_back(triangle);
+    triangle.n0 = triangle.n1 = triangle.n2 = vec4(glm::normalize(cross), 0);
+    looseTriangles.push_back(triangle);
+    looseMaterials.push_back(material);
 }
 
 void Scene::addQuad(vec3 a, vec3 b, vec3 c, vec3 d, uint32_t material)
@@ -40,29 +67,106 @@ void Scene::addQuad(vec3 a, vec3 b, vec3 c, vec3 d, uint32_t material)
     addTriangle(a, c, d, material);
 }
 
+uint32_t Scene::addPrimitive(uint32_t firstTriangle, uint32_t triangleCount, uint32_t material)
+{
+    assert(triangleCount > 0);
+    assert(size_t(firstTriangle) + triangleCount <= triangles.size());
+    primitives.push_back(Primitive{firstTriangle, triangleCount, material, 0});
+    return uint32_t(primitives.size() - 1);
+}
+
+uint32_t Scene::addInstance(const glm::mat4& transform, uint32_t primitive)
+{
+    assert(primitive < primitives.size());
+    Instance instance = {};
+    setTransform(instance, transform);
+    instance.primitive = primitive;
+    instance.material = primitives[primitive].material;
+    instance.lightBase = noLight;
+    instances.push_back(instance);
+    return uint32_t(instances.size() - 1);
+}
+
 void Scene::finalize()
 {
-    require(!triangles.empty(), "Scene has no non-degenerate triangles");
-    require(triangles.size() < UINT32_MAX / 3, "Scene exceeds 32-bit geometry limits");
+    if (!looseTriangles.empty())
+    {
+        assert(looseTriangles.size() == looseMaterials.size());
+
+        // Group the authored triangles by material, in order of first use, so each primitive
+        // ends up with a single material.
+        std::vector<uint32_t> used;
+        for (uint32_t material : looseMaterials)
+        {
+            if (std::find(used.begin(), used.end(), material) == used.end())
+                used.push_back(material);
+        }
+
+        for (uint32_t material : used)
+        {
+            const uint32_t first = uint32_t(triangles.size());
+            for (size_t i = 0; i < looseTriangles.size(); ++i)
+            {
+                if (looseMaterials[i] == material)
+                    triangles.push_back(looseTriangles[i]);
+            }
+            const uint32_t primitive = addPrimitive(first, uint32_t(triangles.size()) - first, material);
+            addInstance(glm::mat4(1.0f), primitive);
+        }
+
+        looseTriangles.clear();
+        looseMaterials.clear();
+    }
+
+    buildLights();
+    computeBounds();
+}
+
+void Scene::buildLights()
+{
+    lights.clear();
+    for (Instance& instance : instances)
+    {
+        const Primitive& primitive = primitives[instance.primitive];
+        const vec3       emission = vec3(materials[primitive.material].emission);
+        if (glm::dot(emission, emission) <= 0.0f)
+        {
+            instance.lightBase = noLight;
+            continue;
+        }
+
+        // Every triangle of an emissive primitive emits, so a hit's light is lightBase + triangle.
+        instance.lightBase = uint32_t(lights.size());
+        for (uint32_t k = 0; k < primitive.triangleCount; ++k)
+        {
+            const Triangle& triangle = triangles[primitive.firstTriangle + k];
+            Light           light = {};
+            light.p0 = vec4(transformPoint(instance.transformRows, vec3(triangle.p0)), 0.0f);
+            light.p1 = vec4(transformPoint(instance.transformRows, vec3(triangle.p1)), 0.0f);
+            light.p2 = vec4(transformPoint(instance.transformRows, vec3(triangle.p2)), 0.0f);
+            light.info = uvec4(primitive.material, 0, 0, 0);
+            lights.push_back(light);
+        }
+    }
+}
+
+void Scene::computeBounds()
+{
     lower = vec3(std::numeric_limits<float>::max());
     upper = -lower;
-    lights.clear();
-    for (size_t i = 0; i < triangles.size(); ++i)
+    for (const Instance& instance : instances)
     {
-        auto& t = triangles[i];
-        for (vec3 p : {vec3(t.p0), vec3(t.p1), vec3(t.p2)})
+        const Primitive& primitive = primitives[instance.primitive];
+        for (uint32_t k = 0; k < primitive.triangleCount; ++k)
         {
-            require(std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z),
-                    "Non-finite vertex position");
-            lower = min(lower, p);
-            upper = max(upper, p);
-        }
-        t.info.y = UINT32_MAX;
-        const auto emission = vec3(materials.at(t.info.x).emission);
-        if (dot(emission, emission) > 0)
-        {
-            t.info.y = uint32_t(lights.size());
-            lights.push_back(uint32_t(i));
+            const Triangle& triangle = triangles[primitive.firstTriangle + k];
+            for (vec3 point : {vec3(triangle.p0), vec3(triangle.p1), vec3(triangle.p2)})
+            {
+                const vec3 world = transformPoint(instance.transformRows, point);
+                assert(std::isfinite(world.x) && std::isfinite(world.y) && std::isfinite(world.z));
+                lower = min(lower, world);
+                upper = max(upper, world);
+            }
         }
     }
 }
