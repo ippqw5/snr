@@ -24,7 +24,7 @@ float3 tracePath(float3 origin, float3 direction, inout uint rng)
 
         Instance instance = instances[hit.instance];
         Triangle triangle = triangleAt(instance, hit.primitive);
-        Material material = materials[instance.material];
+        GltfMaterial material = materials[instance.material];
         float3 wo = -direction;
         SurfaceInteraction surface = surfaceAt(instance, triangle, material, hit.bary, wo);
         float3 position = surface.position;
@@ -38,7 +38,7 @@ float3 tracePath(float3 origin, float3 direction, inout uint rng)
             emissionWeight = powerHeuristic(previousPdf, lightPdf(lights[uint(hitLight)], previousPosition, position));
         }
 
-        radiance += throughput * material.emission.rgb * emissionWeight;
+        radiance += throughput * material.emissiveFactor.rgb * emissionWeight;
 
         if (bounce == params.integrator.x)
             break;
@@ -68,7 +68,7 @@ float3 tracePath(float3 origin, float3 direction, inout uint rng)
                 {
                     BsdfEvaluation bsdf = evaluateBsdf(surface.material, normal, wo, wi);
                     float weight = powerHeuristic(pdf, bsdf.pdf);
-                    radiance += throughput * bsdf.value * materials[light.info.x].emission.rgb * cosine * weight / pdf;
+                    radiance += throughput * bsdf.value * materials[light.info.x].emissiveFactor.rgb * cosine * weight / pdf;
                 }
             }
         }

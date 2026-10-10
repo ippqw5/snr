@@ -1,5 +1,6 @@
 #include "./session.h"
 #include "gpu/device.h"
+#include "shaders/scene_io.h.slang"
 #include "slang-rhi.h"
 #include "slang-rhi/shader-cursor.h"
 
@@ -9,13 +10,6 @@
 
 namespace snr
 {
-struct Params
-{
-    glm::uvec4 image, integrator;
-    glm::vec4  eye, forward, right, up, environment;
-};
-static_assert(sizeof(Params) == 112);
-
 void bindParams(const rhi::ShaderCursor& cursor, const Params& params)
 {
     rhi::ShaderCursor constants;

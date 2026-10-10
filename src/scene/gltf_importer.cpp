@@ -1,16 +1,20 @@
-#include "./gltf_scene.h"
+#include "./gltf_importer.h"
+#include "./scene.h"
 
 #include <algorithm>
 #include <bit>
-#include <cassert>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <limits>
 #include <numeric>
+#include <span>
+#include <string>
 #include <system_error>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -288,25 +292,25 @@ glm::mat4 nodeMatrix(const tinygltf::Node& node)
 // Diagnostics
 //----------------------------------------------------------------------------
 
-void GltfScene::fail(std::string message)
+void GltfImporter::fail(std::string message)
 {
-    m_errors.push_back(std::move(message));
+    m_scene->errors.push_back(std::move(message));
 }
 
-void GltfScene::warn(std::string message)
+void GltfImporter::warn(std::string message)
 {
-    if (std::find(m_warnings.begin(), m_warnings.end(), message) == m_warnings.end())
-        m_warnings.push_back(std::move(message));
+    if (std::find(m_scene->warnings.begin(), m_scene->warnings.end(), message) == m_scene->warnings.end())
+        m_scene->warnings.push_back(std::move(message));
 }
 
-void GltfScene::ignore(std::string feature)
+void GltfImporter::ignore(std::string feature)
 {
     if (std::find(m_ignored.begin(), m_ignored.end(), feature) == m_ignored.end())
         m_ignored.push_back(std::move(feature));
 }
 
 template <typename T>
-const T* GltfScene::check(const std::vector<T>& values, int index, const char* description)
+const T* GltfImporter::check(const std::vector<T>& values, int index, const char* description)
 {
     if (index < 0 || size_t(index) >= values.size())
     {
@@ -316,69 +320,11 @@ const T* GltfScene::check(const std::vector<T>& values, int index, const char* d
     return &values[size_t(index)];
 }
 
-bool GltfScene::loaded() const
-{
-    return m_valid;
-}
-
-const tinygltf::Model& GltfScene::model() const
-{
-    return m_model;
-}
-
-tinygltf::Model& GltfScene::model()
-{
-    return m_model;
-}
-
-const Scene& GltfScene::scene() const
-{
-    return m_scene;
-}
-
-Scene& GltfScene::scene()
-{
-    return m_scene;
-}
-
-int GltfScene::currentScene() const
-{
-    return m_currentScene;
-}
-
-const std::vector<std::string>& GltfScene::errors() const
-{
-    return m_errors;
-}
-
-const std::vector<std::string>& GltfScene::warnings() const
-{
-    return m_warnings;
-}
-
 //----------------------------------------------------------------------------
 // File loading
 //----------------------------------------------------------------------------
 
-bool GltfScene::load(const std::filesystem::path& path)
-{
-    m_model = tinygltf::Model{};
-    m_errors.clear();
-    m_warnings.clear();
-    m_ignored.clear();
-    m_scene = Scene{};
-    m_currentScene = -1;
-    m_valid = false;
-
-    if (!loadGltfFile(path))
-        return false;
-
-    m_currentScene = m_model.defaultScene >= 0 ? m_model.defaultScene : 0;
-    parse();
-    return m_valid;
-}
-
-bool GltfScene::loadGltfFile(const std::filesystem::path& path)
+bool GltfImporter::loadFile(const std::filesystem::path& path)
 {
     std::error_code code;
     const fs::path  canonical = fs::canonical(path, code);
@@ -429,7 +375,7 @@ bool GltfScene::loadGltfFile(const std::filesystem::path& path)
         fail("glTF filesystem callbacks rejected: " + error);
         return false;
     }
-    if (!loader.SetURICallbacks({nullptr, decodeUri, &m_warnings}, &error))
+    if (!loader.SetURICallbacks({nullptr, decodeUri, &m_scene->warnings}, &error))
     {
         fail("glTF URI callbacks rejected: " + error);
         return false;
@@ -437,30 +383,30 @@ bool GltfScene::loadGltfFile(const std::filesystem::path& path)
     loader.SetImageLoader(decodeImage, nullptr);
 
     const bool binary = extensionName == ".glb";
-    const bool loaded = binary ? loader.LoadBinaryFromFile(&m_model, &error, &warning, canonical.string())
-                               : loader.LoadASCIIFromFile(&m_model, &error, &warning, canonical.string());
+    const bool loaded = binary ? loader.LoadBinaryFromFile(m_model.get(), &error, &warning, canonical.string())
+                               : loader.LoadASCIIFromFile(m_model.get(), &error, &warning, canonical.string());
     if (!loaded)
     {
         fail("Could not load glTF " + canonical.string() + (error.empty() ? "" : ": " + error));
         return false;
     }
-    if (m_model.asset.version != "2.0")
+    if (m_model->asset.version != "2.0")
     {
-        fail("glTF 2.0 required, found version \"" + m_model.asset.version + "\"");
+        fail("glTF 2.0 required, found version \"" + m_model->asset.version + "\"");
         return false;
     }
 
     if (!warning.empty())
         warn(warning);
-    if (!m_model.animations.empty())
+    if (!m_model->animations.empty())
         warn("Animations are not evaluated; rendering the static node transform");
 
     return validateExtensions();
 }
 
-bool GltfScene::validateExtensions()
+bool GltfImporter::validateExtensions()
 {
-    for (const auto& name : m_model.extensionsRequired)
+    for (const auto& name : m_model->extensionsRequired)
     {
         const auto* found = std::find(std::begin(supportedExtensions), std::end(supportedExtensions), name);
         if (found == std::end(supportedExtensions))
@@ -472,45 +418,36 @@ bool GltfScene::validateExtensions()
     return true;
 }
 
-bool GltfScene::selectScene()
+bool GltfImporter::selectScene()
 {
-    if (m_model.nodes.empty())
+    if (m_model->nodes.empty())
     {
         fail("glTF has no nodes");
         return false;
     }
-    if (m_model.scenes.empty())
+    if (m_model->scenes.empty())
     {
         fail("glTF has no scenes");
         return false;
     }
-    if (m_currentScene < 0 || size_t(m_currentScene) >= m_model.scenes.size())
+    if (m_scene->currentScene < 0 || size_t(m_scene->currentScene) >= m_model->scenes.size())
     {
-        fail("Invalid glTF scene index: " + std::to_string(m_currentScene));
+        fail("Invalid glTF scene index: " + std::to_string(m_scene->currentScene));
         return false;
     }
     return true;
-}
-
-bool GltfScene::setCurrentScene(int index)
-{
-    if (index < 0 || size_t(index) >= m_model.scenes.size())
-    {
-        fail("Invalid glTF scene index: " + std::to_string(index));
-        return false;
-    }
-    m_currentScene = index;
-    parse();
-    return m_valid;
 }
 
 //----------------------------------------------------------------------------
 // Derived data
 //----------------------------------------------------------------------------
 
-void GltfScene::parse()
+// The scene is prepared by the caller; a fresh Importer is used per call, so its caches start empty.
+bool GltfImporter::import(int sceneIndex)
 {
-    m_scene = Scene{};
+    // One importer outlives one derivation, so every cache that refers to the scene built last time
+    // has to be dropped: resetDerived has just emptied the materials, texels and primitives they
+    // point into.
     m_bindings.clear();
     m_materialIds.clear();
     m_texelBlocks.clear();
@@ -519,9 +456,10 @@ void GltfScene::parse()
     m_defaultBindings = MaterialBindings{};
     m_defaultMaterial = 0;
     m_degenerateTriangles = 0;
-    m_valid = false;
 
-    for (const auto& name : m_model.extensionsUsed)
+    m_scene->currentScene = sceneIndex;
+
+    for (const auto& name : m_model->extensionsUsed)
     {
         const auto* found = std::find(std::begin(supportedExtensions), std::end(supportedExtensions), name);
         if (found == std::end(supportedExtensions))
@@ -529,7 +467,7 @@ void GltfScene::parse()
     }
 
     if (!selectScene())
-        return;
+        return false;
 
     importMaterials();
     importGeometry();
@@ -539,27 +477,27 @@ void GltfScene::parse()
     if (m_degenerateTriangles > 0)
         warn("Skipped " + std::to_string(m_degenerateTriangles) + " degenerate glTF triangles");
 
-    if (m_scene.triangles.empty())
+    if (m_scene->triangles.empty())
     {
         fail("glTF scene has no triangles to render");
-        return;
+        return false;
     }
 
-    m_scene.finalize();
+    m_scene->finalize();
     if (!frameCamera())
-        return;
+        return false;
 
-    m_valid = true;
+    return true;
 }
 
-void GltfScene::importGeometry()
+void GltfImporter::importGeometry()
 {
-    const tinygltf::Scene& scene = m_model.scenes[size_t(m_currentScene)];
+    const tinygltf::Scene& scene = m_model->scenes[size_t(m_scene->currentScene)];
     for (int nodeIndex : scene.nodes)
         visitNode(nodeIndex, glm::mat4(1.0f), 0);
 }
 
-void GltfScene::visitNode(int nodeIndex, const glm::mat4& parent, int depth)
+void GltfImporter::visitNode(int nodeIndex, const glm::mat4& parent, int depth)
 {
     if (depth >= maxNodeDepth)
     {
@@ -567,7 +505,7 @@ void GltfScene::visitNode(int nodeIndex, const glm::mat4& parent, int depth)
         return;
     }
 
-    const tinygltf::Node* node = check(m_model.nodes, nodeIndex, "node");
+    const tinygltf::Node* node = check(m_model->nodes, nodeIndex, "node");
     if (!node)
         return;
 
@@ -575,7 +513,7 @@ void GltfScene::visitNode(int nodeIndex, const glm::mat4& parent, int depth)
 
     if (node->mesh >= 0)
     {
-        if (const tinygltf::Mesh* mesh = check(m_model.meshes, node->mesh, "mesh"))
+        if (const tinygltf::Mesh* mesh = check(m_model->meshes, node->mesh, "mesh"))
             emitMesh(*mesh, node->mesh, world);
     }
 
@@ -583,7 +521,7 @@ void GltfScene::visitNode(int nodeIndex, const glm::mat4& parent, int depth)
         visitNode(child, world, depth + 1);
 }
 
-void GltfScene::emitMesh(const tinygltf::Mesh& mesh, int meshIndex, const glm::mat4& world)
+void GltfImporter::emitMesh(const tinygltf::Mesh& mesh, int meshIndex, const glm::mat4& world)
 {
     if (!mesh.weights.empty())
         ignore("morph targets");
@@ -600,11 +538,11 @@ void GltfScene::emitMesh(const tinygltf::Mesh& mesh, int meshIndex, const glm::m
         if (shared == badPrimitive)
             continue;
 
-        m_scene.addInstance(world, shared);
+        m_scene->addInstance(world, shared);
     }
 }
 
-uint32_t GltfScene::primitiveFor(int meshIndex, int primitiveIndex, const tinygltf::Primitive& primitive)
+uint32_t GltfImporter::primitiveFor(int meshIndex, int primitiveIndex, const tinygltf::Primitive& primitive)
 {
     const uint64_t key = (uint64_t(uint32_t(meshIndex)) << 32) | uint32_t(primitiveIndex);
     if (const auto found = m_primitiveCache.find(key); found != m_primitiveCache.end())
@@ -615,7 +553,7 @@ uint32_t GltfScene::primitiveFor(int meshIndex, int primitiveIndex, const tinygl
     return index;
 }
 
-uint32_t GltfScene::buildPrimitive(const tinygltf::Primitive& primitive)
+uint32_t GltfImporter::buildPrimitive(const tinygltf::Primitive& primitive)
 {
     const auto positionAttribute = primitive.attributes.find("POSITION");
     if (positionAttribute == primitive.attributes.end())
@@ -650,7 +588,7 @@ uint32_t GltfScene::buildPrimitive(const tinygltf::Primitive& primitive)
     uint32_t                material = m_defaultMaterial;
     if (primitive.material >= 0)
     {
-        if (!check(m_model.materials, primitive.material, "material"))
+        if (!check(m_model->materials, primitive.material, "material"))
             return badPrimitive;
         binding = &m_bindings[size_t(primitive.material)];
         material = m_materialIds[size_t(primitive.material)];
@@ -674,7 +612,7 @@ uint32_t GltfScene::buildPrimitive(const tinygltf::Primitive& primitive)
         return uv.empty() ? glm::vec2(0.0f) : uv[index];
     };
 
-    const uint32_t first = uint32_t(m_scene.triangles.size());
+    const uint32_t first = uint32_t(m_scene->triangles.size());
     for (size_t i = 0; i + 2 < corners.size(); i += 3)
     {
         const uint32_t corner[3] = {corners[i], corners[i + 1], corners[i + 2]};
@@ -715,20 +653,21 @@ uint32_t GltfScene::buildPrimitive(const tinygltf::Primitive& primitive)
         triangle.n0 = vec4(shading[0], 0.0f);
         triangle.n1 = vec4(shading[1], 0.0f);
         triangle.n2 = vec4(shading[2], 0.0f);
-        triangle.uv01 = vec4(uvAt(baseUv, corner[0]), uvAt(baseUv, corner[1]));
-        triangle.uv2 = vec4(uvAt(baseUv, corner[2]), 0.0f, 0.0f);
-        triangle.mrUV01 = vec4(uvAt(roughnessUv, corner[0]), uvAt(roughnessUv, corner[1]));
-        triangle.mrUV2 = vec4(uvAt(roughnessUv, corner[2]), 0.0f, 0.0f);
-        m_scene.triangles.push_back(triangle);
+        triangle.baseColorUv01 = vec4(uvAt(baseUv, corner[0]), uvAt(baseUv, corner[1]));
+        triangle.baseColorUv2 = vec4(uvAt(baseUv, corner[2]), 0.0f, 0.0f);
+        triangle.metallicRoughnessUv01 =
+            vec4(uvAt(roughnessUv, corner[0]), uvAt(roughnessUv, corner[1]));
+        triangle.metallicRoughnessUv2 = vec4(uvAt(roughnessUv, corner[2]), 0.0f, 0.0f);
+        m_scene->triangles.push_back(triangle);
     }
 
-    if (m_scene.triangles.size() == first)
+    if (m_scene->triangles.size() == first)
         return badPrimitive;
 
-    return m_scene.addPrimitive(first, uint32_t(m_scene.triangles.size()) - first, material);
+    return m_scene->addPrimitive(first, uint32_t(m_scene->triangles.size()) - first, material);
 }
 
-bool GltfScene::readUv(
+bool GltfImporter::readUv(
     const tinygltf::Primitive& primitive,
     const TextureCoordinates&  coordinates,
     size_t                     vertexCount,
@@ -761,7 +700,7 @@ bool GltfScene::readUv(
     return true;
 }
 
-std::vector<uint32_t> GltfScene::trianglesOf(
+std::vector<uint32_t> GltfImporter::trianglesOf(
     const tinygltf::Primitive&   primitive,
     const std::vector<uint32_t>& indices
 )
@@ -802,18 +741,18 @@ std::vector<uint32_t> GltfScene::trianglesOf(
     return corners;
 }
 
-bool GltfScene::frameCamera()
+bool GltfImporter::frameCamera()
 {
-    m_scene.target = (m_scene.lower + m_scene.upper) * 0.5f;
-    const float radius = glm::length(m_scene.upper - m_scene.lower) * 0.5f;
+    m_scene->target = (m_scene->lower + m_scene->upper) * 0.5f;
+    const float radius = glm::length(m_scene->upper - m_scene->lower) * 0.5f;
     if (!(radius > 0.0f))
     {
         fail("glTF scene has no extent");
         return false;
     }
 
-    m_scene.eye = m_scene.target + glm::normalize(vec3(1.3f, 0.8f, 1.8f)) * radius * 3.6f;
-    m_scene.environment = vec3(0.35f);
+    m_scene->eye = m_scene->target + glm::normalize(vec3(1.3f, 0.8f, 1.8f)) * radius * 3.6f;
+    m_scene->environment = vec3(0.35f);
     return true;
 }
 
@@ -821,12 +760,12 @@ bool GltfScene::frameCamera()
 // Materials and textures
 //----------------------------------------------------------------------------
 
-glm::vec2 GltfScene::TextureCoordinates::apply(glm::vec2 uv) const
+glm::vec2 GltfImporter::TextureCoordinates::apply(glm::vec2 uv) const
 {
     return glm::vec2(transform * glm::vec3(uv, 1.0f));
 }
 
-GltfScene::TextureCoordinates GltfScene::textureCoordinates(const tinygltf::TextureInfo& info)
+GltfImporter::TextureCoordinates GltfImporter::textureCoordinates(const tinygltf::TextureInfo& info)
 {
     TextureCoordinates result;
     result.set = info.texCoord;
@@ -873,7 +812,7 @@ GltfScene::TextureCoordinates GltfScene::textureCoordinates(const tinygltf::Text
     return result;
 }
 
-int GltfScene::imageOf(const tinygltf::Texture& texture)
+int GltfImporter::imageOf(const tinygltf::Texture& texture)
 {
     if (extension(texture.extensions, "KHR_texture_basisu"))
     {
@@ -888,7 +827,7 @@ int GltfScene::imageOf(const tinygltf::Texture& texture)
     return texture.source;
 }
 
-bool GltfScene::texelsFor(int imageIndex, bool srgb, TexelBlock& block)
+bool GltfImporter::texelsFor(int imageIndex, bool srgb, TexelBlock& block)
 {
     const uint64_t key = (uint64_t(uint32_t(imageIndex)) << 1) | uint64_t(srgb ? 1 : 0);
     if (const auto found = m_texelBlocks.find(key); found != m_texelBlocks.end())
@@ -906,7 +845,7 @@ bool GltfScene::texelsFor(int imageIndex, bool srgb, TexelBlock& block)
         return message;
     };
 
-    const tinygltf::Image* image = check(m_model.images, imageIndex, "image");
+    const tinygltf::Image* image = check(m_model->images, imageIndex, "image");
     if (!image)
         return remember(TexelBlock{badTexel, 0, 0}), false;
     if (image->width <= 0 || image->height <= 0)
@@ -934,7 +873,7 @@ bool GltfScene::texelsFor(int imageIndex, bool srgb, TexelBlock& block)
     }
 
     TexelBlock result;
-    result.offset = m_scene.texels.size();
+    result.offset = m_scene->texels.size();
     result.width = image->width;
     result.height = image->height;
     if (result.offset + pixelCount > size_t(INT32_MAX))
@@ -943,7 +882,7 @@ bool GltfScene::texelsFor(int imageIndex, bool srgb, TexelBlock& block)
         return false;
     }
 
-    m_scene.texels.resize(result.offset + pixelCount);
+    m_scene->texels.resize(result.offset + pixelCount);
     const unsigned char* data = image->image.data();
     for (size_t pixel = 0; pixel < pixelCount; ++pixel)
     {
@@ -965,38 +904,42 @@ bool GltfScene::texelsFor(int imageIndex, bool srgb, TexelBlock& block)
         vec4 texel(channels[0], channels[1], channels[2], channels[3]);
         if (srgb)
             texel = vec4(srgbToLinear(texel.r), srgbToLinear(texel.g), srgbToLinear(texel.b), texel.a);
-        m_scene.texels[result.offset + pixel] = texel;
+        m_scene->texels[result.offset + pixel] = texel;
     }
 
     block = remember(result);
     return true;
 }
 
-ivec4 GltfScene::bindTexture(
+void GltfImporter::bindTexture(
     const tinygltf::TextureInfo& info,
     bool                         srgb,
     TextureCoordinates&          coordinates,
-    int&                         wrapS,
-    int&                         wrapT
+    ivec4&                       texture,
+    uvec4&                       sampler
 )
 {
+    // An absent texture leaves the slot empty. The shader treats a negative offset as "no texture"
+    // and samples white, so the material factor is then used on its own.
+    texture = ivec4(-1, 0, 0, 0);
+    sampler = uvec4(repeat, repeat, 0, 0);
     if (info.index < 0)
-        return ivec4(-1, 0, 0, 0);
+        return;
 
     coordinates = textureCoordinates(info);
 
-    const tinygltf::Texture* texture = check(m_model.textures, info.index, "texture");
-    if (!texture)
-        return ivec4(-1, 0, 0, 0);
+    const tinygltf::Texture* source = check(m_model->textures, info.index, "texture");
+    if (!source)
+        return;
 
-    int filter = 0;
-    if (texture->sampler >= 0)
+    int wrapS = repeat, wrapT = repeat, filter = 0;
+    if (source->sampler >= 0)
     {
-        if (const tinygltf::Sampler* sampler = check(m_model.samplers, texture->sampler, "sampler"))
+        if (const tinygltf::Sampler* gltfSampler = check(m_model->samplers, source->sampler, "sampler"))
         {
-            wrapS = sampler->wrapS;
-            wrapT = sampler->wrapT;
-            filter = sampler->magFilter == nearest ? 1 : 0;
+            wrapS = gltfSampler->wrapS;
+            wrapT = gltfSampler->wrapT;
+            filter = gltfSampler->magFilter == nearest ? 1 : 0;
         }
     }
     if (!validWrap(wrapS) || !validWrap(wrapT))
@@ -1006,18 +949,19 @@ ivec4 GltfScene::bindTexture(
         wrapT = repeat;
     }
 
-    const int imageIndex = imageOf(*texture);
+    const int imageIndex = imageOf(*source);
     if (imageIndex < 0)
-        return ivec4(-1, 0, 0, 0);
+        return;
 
     TexelBlock block;
     if (!texelsFor(imageIndex, srgb, block))
-        return ivec4(-1, 0, 0, 0);
+        return;
 
-    return ivec4(int(block.offset), block.width, block.height, filter);
+    texture = ivec4(int(block.offset), block.width, block.height, 0);
+    sampler = uvec4(uint32_t(wrapS), uint32_t(wrapT), uint32_t(filter), 0);
 }
 
-void GltfScene::reportUnsupportedMaterial(const tinygltf::Material& material)
+void GltfImporter::reportUnsupportedMaterial(const tinygltf::Material& material)
 {
     if (material.emissiveTexture.index >= 0)
         ignore("emissive textures");
@@ -1029,21 +973,21 @@ void GltfScene::reportUnsupportedMaterial(const tinygltf::Material& material)
         ignore("alpha modes other than OPAQUE (" + material.alphaMode + ")");
 }
 
-void GltfScene::importMaterials()
+void GltfImporter::importMaterials()
 {
-    m_bindings.reserve(m_model.materials.size());
-    m_materialIds.reserve(m_model.materials.size());
+    m_bindings.reserve(m_model->materials.size());
+    m_materialIds.reserve(m_model->materials.size());
 
-    for (const tinygltf::Material& source : m_model.materials)
+    for (const tinygltf::Material& source : m_model->materials)
     {
         const tinygltf::PbrMetallicRoughness& pbr = source.pbrMetallicRoughness;
 
-        Material material;
-        material.baseColor = factor4(pbr.baseColorFactor, vec4(1.0f));
-        material.pbr.x = float(pbr.metallicFactor);
-        material.pbr.y = float(pbr.roughnessFactor);
-        material.settings.z = source.doubleSided ? 1 : 0;
-        material.settings.w = 1; // Enable the metallic-roughness response.
+        GltfMaterial material;
+        material.pbrBaseColorFactor = factor4(pbr.baseColorFactor, vec4(1.0f));
+        material.pbrMetallicRoughnessFactor.x = float(pbr.metallicFactor);
+        material.pbrMetallicRoughnessFactor.y = float(pbr.roughnessFactor);
+        material.flags.x = source.doubleSided ? 1u : 0u;
+        material.flags.y = 1u; // Enable the metallic-roughness response.
 
         float emissiveStrength = 1.0f;
         if (const tinygltf::Value* ext = extension(source.extensions, "KHR_materials_emissive_strength"))
@@ -1063,47 +1007,51 @@ void GltfScene::importMaterials()
         // would make every surface of the material emit white.
         const bool textured = source.emissiveTexture.index >= 0;
         const vec3 emitted = textured ? vec3(0.0f) : factor3(source.emissiveFactor, vec3(0.0f));
-        material.emission = vec4(emitted * emissiveStrength, 0.0f);
+        material.emissiveFactor = vec4(emitted * emissiveStrength, 0.0f);
 
         MaterialBindings binding;
-        int              baseWrapS = repeat, baseWrapT = repeat;
-        int              roughWrapS = repeat, roughWrapT = repeat;
-        material.texture = bindTexture(pbr.baseColorTexture, true, binding.baseColor, baseWrapS, baseWrapT);
-        material.mrTexture =
-            bindTexture(pbr.metallicRoughnessTexture, false, binding.metallicRoughness, roughWrapS, roughWrapT);
-        material.settings.x = uint32_t(baseWrapS);
-        material.settings.y = uint32_t(baseWrapT);
-        material.mrSettings.x = uint32_t(roughWrapS);
-        material.mrSettings.y = uint32_t(roughWrapT);
+        bindTexture(
+            pbr.baseColorTexture,
+            true,
+            binding.baseColor,
+            material.pbrBaseColorTexture,
+            material.pbrBaseColorSampler
+        );
+        bindTexture(
+            pbr.metallicRoughnessTexture,
+            false,
+            binding.metallicRoughness,
+            material.pbrMetallicRoughnessTexture,
+            material.pbrMetallicRoughnessSampler
+        );
 
         reportUnsupportedMaterial(source);
 
-        m_materialIds.push_back(uint32_t(m_scene.materials.size()));
+        m_materialIds.push_back(uint32_t(m_scene->materials.size()));
         m_bindings.push_back(binding);
-        m_scene.materials.push_back(material);
+        m_scene->materials.push_back(material);
     }
 
-    // The glTF default material: white, fully metallic, fully rough.
-    Material fallback;
-    fallback.baseColor = vec4(1.0f);
-    fallback.pbr = vec4(1.0f, 1.0f, 0.0f, 0.0f);
-    fallback.settings.z = 0;
-    fallback.settings.w = 1;
-    m_defaultMaterial = uint32_t(m_scene.materials.size());
-    m_scene.materials.push_back(fallback);
+    // The glTF default material: white, fully metallic, fully rough, single sided.
+    GltfMaterial fallback;
+    fallback.pbrBaseColorFactor = vec4(1.0f);
+    fallback.pbrMetallicRoughnessFactor = vec4(1.0f, 1.0f, 0.0f, 0.0f);
+    fallback.flags = uvec4(0, 1, 0, 0);
+    m_defaultMaterial = uint32_t(m_scene->materials.size());
+    m_scene->materials.push_back(fallback);
 }
 
 //----------------------------------------------------------------------------
 // Accessors
 //----------------------------------------------------------------------------
 
-bool GltfScene::viewOf(int bufferViewIndex, size_t offset, size_t elementSize, size_t count, AccessorView& view)
+bool GltfImporter::viewOf(int bufferViewIndex, size_t offset, size_t elementSize, size_t count, AccessorView& view)
 {
-    const tinygltf::BufferView* bufferView = check(m_model.bufferViews, bufferViewIndex, "buffer view");
+    const tinygltf::BufferView* bufferView = check(m_model->bufferViews, bufferViewIndex, "buffer view");
     if (!bufferView)
         return false;
 
-    const tinygltf::Buffer* buffer = check(m_model.buffers, bufferView->buffer, "buffer");
+    const tinygltf::Buffer* buffer = check(m_model->buffers, bufferView->buffer, "buffer");
     if (!buffer)
         return false;
 
@@ -1147,9 +1095,9 @@ bool GltfScene::viewOf(int bufferViewIndex, size_t offset, size_t elementSize, s
     return true;
 }
 
-bool GltfScene::readAttribute(int accessorIndex, int type, std::vector<float>& values)
+bool GltfImporter::readAttribute(int accessorIndex, int type, std::vector<float>& values)
 {
-    const tinygltf::Accessor* accessor = check(m_model.accessors, accessorIndex, "accessor");
+    const tinygltf::Accessor* accessor = check(m_model->accessors, accessorIndex, "accessor");
     if (!accessor)
         return false;
     if (accessor->type != type)
@@ -1261,7 +1209,7 @@ bool GltfScene::readAttribute(int accessorIndex, int type, std::vector<float>& v
     return true;
 }
 
-bool GltfScene::readIndices(int accessorIndex, size_t vertexCount, std::vector<uint32_t>& indices)
+bool GltfImporter::readIndices(int accessorIndex, size_t vertexCount, std::vector<uint32_t>& indices)
 {
     if (accessorIndex < 0)
     {
@@ -1270,7 +1218,7 @@ bool GltfScene::readIndices(int accessorIndex, size_t vertexCount, std::vector<u
         return true;
     }
 
-    const tinygltf::Accessor* accessor = check(m_model.accessors, accessorIndex, "accessor");
+    const tinygltf::Accessor* accessor = check(m_model->accessors, accessorIndex, "accessor");
     if (!accessor)
         return false;
     if (accessor->sparse.isSparse)
@@ -1308,5 +1256,49 @@ bool GltfScene::readIndices(int accessorIndex, size_t vertexCount, std::vector<u
         }
     }
     return true;
+}
+
+//----------------------------------------------------------------------------
+// GltfImporter
+//----------------------------------------------------------------------------
+
+bool GltfImporter::load(Scene& scene, const std::filesystem::path& path)
+{
+    m_scene = &scene;
+
+    // Reset before loading so the diagnostics the load itself produces survive.
+    scene.resetDerived();
+
+    m_model = std::make_shared<tinygltf::Model>();
+
+    if (!loadFile(path))
+    {
+        // Nothing usable was imported, so there is no model worth keeping.
+        m_model.reset();
+        return false;
+    }
+
+    return import(m_model->defaultScene >= 0 ? m_model->defaultScene : 0);
+}
+
+bool GltfImporter::derive(Scene& scene, int sceneIndex)
+{
+    m_scene = &scene;
+    if (!m_model)
+    {
+        scene.errors = {"No glTF model is loaded"};
+        return false;
+    }
+
+    // Validated before the reset so an out-of-range index leaves the scene intact.
+    if (sceneIndex < 0 || size_t(sceneIndex) >= m_model->scenes.size())
+    {
+        scene.errors = {"Invalid glTF scene index: " + std::to_string(sceneIndex)};
+        return false;
+    }
+
+    scene.resetDerived();
+
+    return import(sceneIndex);
 }
 } // namespace snr

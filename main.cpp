@@ -1,4 +1,3 @@
-#include "io/gltf_scene.h"
 #include "render/renderer.h"
 #include "scene/scene.h"
 
@@ -155,7 +154,7 @@ int main(int argc, char** argv)
             else if (arg == "--height")
                 options.image.height = integer(i, 1, 8192);
             else if (arg == "--spp")
-                options.spp = integer(i, 1, 1000);
+                options.spp = integer(i, 1, 1024 * 1024);
             else if (arg == "--max-bounces")
                 options.integrator.maxBounces = integer(i, 1, 64);
             else if (arg == "--seed")
@@ -208,25 +207,24 @@ int main(int argc, char** argv)
         if (!builtIn)
             modelPath = findModel(assetDir, sceneName);
 
-        GltfScene gltf;
-        Scene     builtInScene;
+        Scene scene;
+        bool  loaded = true;
         if (builtIn)
-            builtInScene = sceneName == "cornell" ? makeCornellBox() : makeFurnaceScene();
+            scene = sceneName == "cornell" ? makeCornellBox() : makeFurnaceScene();
         else
-            gltf.load(modelPath);
+            loaded = scene.loadGltf(modelPath);
 
         // Warnings explain recoverable problems, and often why a load failed, so print them first.
-        for (const auto& warning : gltf.warnings())
+        for (const auto& warning : scene.warnings)
             std::fprintf(stderr, "Warning: %s\n", warning.c_str());
 
-        if (!builtIn && !gltf.loaded())
+        if (!loaded)
         {
-            for (const auto& error : gltf.errors())
+            for (const auto& error : scene.errors)
                 std::fprintf(stderr, "Error: %s\n", error.c_str());
             return 1;
         }
 
-        Scene& scene = builtIn ? builtInScene : gltf.scene();
         if (studio)
             addStudio(scene);
 

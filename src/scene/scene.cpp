@@ -40,9 +40,9 @@ void setTransform(Instance& instance, const glm::mat4& transform)
 
 uint32_t Scene::addMaterial(vec3 color, vec3 emission)
 {
-    Material material;
-    material.baseColor = vec4(color, 1);
-    material.emission = vec4(emission, 0);
+    GltfMaterial material;
+    material.pbrBaseColorFactor = vec4(color, 1);
+    material.emissiveFactor = vec4(emission, 0);
     materials.push_back(material);
     return uint32_t(materials.size() - 1);
 }
@@ -128,7 +128,7 @@ void Scene::buildLights()
     for (Instance& instance : instances)
     {
         const Primitive& primitive = primitives[instance.primitive];
-        const vec3       emission = vec3(materials[primitive.material].emission);
+        const vec3       emission = vec3(materials[primitive.material].emissiveFactor);
         if (glm::dot(emission, emission) <= 0.0f)
         {
             instance.lightBase = noLight;
@@ -169,6 +169,48 @@ void Scene::computeBounds()
             }
         }
     }
+}
+
+//----------------------------------------------------------------------------
+// glTF loading
+//----------------------------------------------------------------------------
+
+bool Scene::loadGltf(const std::filesystem::path& path)
+{
+    return importer.load(*this, path);
+}
+
+bool Scene::parse()
+{
+    return importer.derive(*this, currentScene);
+}
+
+bool Scene::setCurrentScene(int index)
+{
+    return importer.derive(*this, index);
+}
+
+void Scene::resetDerived()
+{
+    triangles.clear();
+    primitives.clear();
+    instances.clear();
+    materials.clear();
+    lights.clear();
+    texels.clear();
+    looseTriangles.clear();
+    looseMaterials.clear();
+
+    lower = upper = vec3(0.0f);
+    eye = vec3(0.0f, 1.0f, 3.6f);
+    target = vec3(0.0f, 1.0f, 0.0f);
+    up = vec3(0.0f, 1.0f, 0.0f);
+    environment = vec3(0.0f);
+    fov = 40.0f;
+
+    errors.clear();
+    warnings.clear();
+    currentScene = -1;
 }
 
 static void addBox(Scene& scene, vec3(center), vec3 size, float angle, uint32_t material)

@@ -1,61 +1,7 @@
 import bsdf;
 
-struct Triangle
-{
-    float4 p0, p1, p2;
-    float4 n0, n1, n2;
-    float4 uv01, uv2;
-    float4 mrUv01, mrUv02;
-};
-
-struct Primitive
-{
-    uint firstTriangle;
-    uint triangleCount;
-    uint material;
-    uint reserved;
-};
-
-// Places a primitive in the world. The rows are explicit so the host and shader agree on
-// layout without depending on either side's matrix convention.
-struct Instance
-{
-    float4 transformRows[3];
-    float4 normalRows[3];
-    uint primitive;
-    uint material;
-    uint lightBase;
-    uint flags;
-};
-
-// A world-space emissive triangle used for next-event estimation.
-struct Light
-{
-    float4 p0, p1, p2;
-    uint4 info;
-};
-
-struct Material
-{
-    float4 baseColor;
-    float4 emission;
-    int4 textureInfo;
-    uint4 settings;
-    float4 pbr;
-    int4 mrTextureInfo;
-    uint4 mrSettings;
-};
-
-struct Params
-{
-    uint4 image;
-    uint4 integrator;
-    float4 eye;
-    float4 forward;
-    float4 right;
-    float4 up;
-    float4 environment;
-};
+// The host/device structs live in a file the C++ side includes too, so their layouts cannot drift.
+#include "scene_io.h.slang"
 
 // A committed hit, resolved to the instance that produced it.
 struct Hit
@@ -70,7 +16,7 @@ RaytracingAccelerationStructure sceneBVH;
 StructuredBuffer<Triangle> triangles;
 StructuredBuffer<Primitive> primitives;
 StructuredBuffer<Instance> instances;
-StructuredBuffer<Material> materials;
+StructuredBuffer<GltfMaterial> materials;
 StructuredBuffer<Light> lights;
 StructuredBuffer<float4> texels;
 ConstantBuffer<Params> params;
@@ -125,10 +71,10 @@ bool traceScene(float3 origin, float3 direction, float tMax, bool anyHit, out Hi
         if (query.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE)
         {
             Instance instance = instances[query.CandidateInstanceID()];
-            Material material = materials[instance.material];
+            GltfMaterial material = materials[instance.material];
             Triangle triangle = triangleAt(instance, query.CandidatePrimitiveIndex());
 
-            if (material.settings.z != 0 || dot(geometricNormal(instance, triangle), direction) < 0)
+            if (material.flags.x != 0 || dot(geometricNormal(instance, triangle), direction) < 0)
                 query.CommitNonOpaqueTriangleHit();
         }
     }
@@ -166,35 +112,37 @@ float wrapCoordinate(float uv, uint mode)
     return mode == 33648 ? 1 - abs(frac(uv * 0.5) * 2 - 1) : frac(uv);
 }
 
-float3 sampleTexture(int4 textureInfo, uint2 wrap, float4 uv01, float4 uv2, float2 bary)
+// sampler holds the wrap modes in .xy and the point-filter flag in .z.
+float3 sampleTexture(int4 textureInfo, uint4 sampler, float4 uv01, float4 uv2, float2 bary)
 {
     if (textureInfo.x < 0)
         return 1;
     float2 uv = uv01.xy * (1 - bary.x - bary.y) + uv01.zw * bary.x + uv2.xy * bary.y;
-    uv = float2(wrapCoordinate(uv.x, wrap.x), wrapCoordinate(uv.y, wrap.y));
+    uv = float2(wrapCoordinate(uv.x, sampler.x), wrapCoordinate(uv.y, sampler.y));
     float2 p = uv * float2(textureInfo.yz);
-    if (textureInfo.w == 1)
-        return fetchTexel(textureInfo, wrap, int2(floor(p)));
+    if (sampler.z == 1)
+        return fetchTexel(textureInfo, sampler.xy, int2(floor(p)));
 
     p -= 0.5;
     int2 lo = int2(floor(p));
     float2 f = frac(p);
-    return lerp(lerp(fetchTexel(textureInfo, wrap, lo),
-                    fetchTexel(textureInfo, wrap, lo + int2(1, 0)), f.x),
-                lerp(fetchTexel(textureInfo, wrap, lo + int2(0, 1)),
-                    fetchTexel(textureInfo, wrap, lo + int2(1, 1)), f.x), f.y);
+    return lerp(lerp(fetchTexel(textureInfo, sampler.xy, lo),
+                    fetchTexel(textureInfo, sampler.xy, lo + int2(1, 0)), f.x),
+                lerp(fetchTexel(textureInfo, sampler.xy, lo + int2(0, 1)),
+                    fetchTexel(textureInfo, sampler.xy, lo + int2(1, 1)), f.x), f.y);
 }
 
-SurfaceMaterial materialAt(Triangle triangle, Material material, float2 bary)
+SurfaceMaterial materialAt(Triangle triangle, GltfMaterial material, float2 bary)
 {
     SurfaceMaterial result = {};
-    result.baseColor = material.baseColor.rgb * sampleTexture(material.textureInfo,
-        material.settings.xy, triangle.uv01, triangle.uv2, bary);
+    result.baseColor = material.pbrBaseColorFactor.rgb * sampleTexture(material.pbrBaseColorTexture,
+        material.pbrBaseColorSampler, triangle.baseColorUv01, triangle.baseColorUv2, bary);
 
-    float3 mr = sampleTexture(material.mrTextureInfo, material.mrSettings.xy, triangle.mrUv01, triangle.mrUv02, bary);
-    result.metallic = saturate(material.pbr.x * mr.b);
-    result.roughness = saturate(material.pbr.y * mr.g);
-    result.diffuseOnly = material.settings.w == 0;
+    float3 mr = sampleTexture(material.pbrMetallicRoughnessTexture, material.pbrMetallicRoughnessSampler,
+        triangle.metallicRoughnessUv01, triangle.metallicRoughnessUv2, bary);
+    result.metallic = saturate(material.pbrMetallicRoughnessFactor.x * mr.b);
+    result.roughness = saturate(material.pbrMetallicRoughnessFactor.y * mr.g);
+    result.diffuseOnly = material.flags.y == 0;
     return result;
 }
 
@@ -206,7 +154,7 @@ struct SurfaceInteraction
     SurfaceMaterial material;
 };
 
-SurfaceInteraction surfaceAt(Instance instance, Triangle triangle, Material material, float2 bary, float3 wo)
+SurfaceInteraction surfaceAt(Instance instance, Triangle triangle, GltfMaterial material, float2 bary, float3 wo)
 {
     SurfaceInteraction surface = {};
 
@@ -240,7 +188,7 @@ float lightPdf(Light light, float3 from, float3 to)
     float3 crossEdges = cross(light.p1.xyz - light.p0.xyz, light.p2.xyz - light.p0.xyz);
     float twiceArea = length(crossEdges);
     float cosine = dot(crossEdges / twiceArea, -normalize(delta));
-    if (materials[light.info.x].settings.z != 0)
+    if (materials[light.info.x].flags.x != 0)
         cosine = abs(cosine);
     if (cosine <= 0 || params.integrator.z == 0)
         return 0;
