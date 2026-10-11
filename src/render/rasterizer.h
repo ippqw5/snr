@@ -11,7 +11,8 @@ namespace snr
 // The colour target is offscreen rather than a swapchain image, so a window can replace it later
 // without changing the pass. Whatever the fragment shader writes is copied into the film's
 // accumulation buffer with sample count 1, after which the shared tonemap and image-output path runs
-// exactly as it does for the path tracer.
+// exactly as it does for the path tracer. Alongside the colour the pass writes an object-id target
+// (the instance under each pixel) for picking and segmentation.
 class RasterSession : public Session
 {
 public:
@@ -31,7 +32,7 @@ private:
     rhi::ComPtr<rhi::IRenderPipeline>  m_pipeline;
     rhi::ComPtr<rhi::IRenderPipeline>  m_present;
     rhi::Format                        m_presentFormat = rhi::Format::Undefined;
-    rhi::ComPtr<rhi::ITexture>         m_color, m_depth;
-    rhi::ComPtr<rhi::ITextureView>     m_colorView, m_depthView;
+    rhi::ComPtr<rhi::ITexture>         m_color, m_depth, m_objectId;
+    rhi::ComPtr<rhi::ITextureView>     m_colorView, m_depthView, m_objectIdView;
 };
 } // namespace snr

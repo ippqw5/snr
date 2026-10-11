@@ -55,12 +55,15 @@ RasterParams makeRasterParams(const RenderSettings& settings, glm::vec3 environm
 RasterSession::RasterSession(ShaderLibrary& shaders, const Scene& scene, const RenderSettings& settings)
     : Session(shaders, scene, settings)
 {
-    ColorTargetDesc target = {};
-    target.format = Format::RGBA32Float;
+    // Target 0 is the shaded image; target 1 is the instance under each pixel, written as an integer
+    // so a picking or segmentation pass can read it back without decoding a colour.
+    ColorTargetDesc targets[2] = {};
+    targets[0].format = Format::RGBA32Float;
+    targets[1].format = Format::R32Uint;
 
     RenderPipelineDesc desc = {};
-    desc.targets = &target;
-    desc.targetCount = 1;
+    desc.targets = targets;
+    desc.targetCount = 2;
     desc.primitiveTopology = PrimitiveTopology::TriangleList;
     desc.depthStencil.format = Format::D32Float;
     desc.depthStencil.depthTestEnable = true;
@@ -98,10 +101,20 @@ void RasterSession::createTargets(ImageSize size)
     ComPtr<ITextureView> depthView;
     checkRhi(depth->createView({}, depthView.writeRef()), "create raster depth view");
 
+    TextureDesc objectIdDesc = colorDesc;
+    objectIdDesc.format = Format::R32Uint;
+    objectIdDesc.usage = TextureUsage::RenderTarget;
+    ComPtr<ITexture> objectId;
+    checkRhi(device->createTexture(objectIdDesc, nullptr, objectId.writeRef()), "create raster object-id target");
+    ComPtr<ITextureView> objectIdView;
+    checkRhi(objectId->createView({}, objectIdView.writeRef()), "create raster object-id view");
+
     m_color = color;
     m_colorView = colorView;
     m_depth = depth;
     m_depthView = depthView;
+    m_objectId = objectId;
+    m_objectIdView = objectIdView;
 }
 
 void RasterSession::resize(ImageSize size)
@@ -133,6 +146,14 @@ void RasterSession::render()
     color.clearValue[2] = m_environment.z;
     color.clearValue[3] = 1.0f;
 
+    // Object ids are one-based, so the zero a cleared pixel keeps means "nothing here".
+    RenderPassColorAttachment objectId = {};
+    objectId.view = m_objectIdView;
+    objectId.loadOp = LoadOp::Clear;
+    objectId.storeOp = StoreOp::Store;
+
+    RenderPassColorAttachment colors[2] = {color, objectId};
+
     RenderPassDepthStencilAttachment depth = {};
     depth.view = m_depthView;
     depth.depthLoadOp = LoadOp::Clear;
@@ -140,8 +161,8 @@ void RasterSession::render()
     depth.depthClearValue = 0.0f; // Reversed-Z: zero is the far plane
 
     RenderPassDesc passDesc = {};
-    passDesc.colorAttachments = &color;
-    passDesc.colorAttachmentCount = 1;
+    passDesc.colorAttachments = colors;
+    passDesc.colorAttachmentCount = 2;
     passDesc.depthStencilAttachment = &depth;
 
     auto* pass = encoder->beginRenderPass(passDesc);

@@ -161,8 +161,17 @@ struct RasterPixel
     nointerpolation uint instanceIndex : INSTANCE;
 };
 
+// The fragment outputs, spelled out with explicit target semantics: a return value plus an `out`
+// parameter get their locations assigned in the wrong order, which silently puts the id in the colour
+// target.
+struct RasterOutput
+{
+    float4 color : SV_Target0;
+    uint   objectId : SV_Target1;
+};
+
 [shader("fragment")]
-float4 rasterFS(
+RasterOutput rasterFS(
     RasterPixel input,
     uint        primitiveIndex : SV_PrimitiveID,
     float3      barycentric : SV_Barycentrics
@@ -188,11 +197,17 @@ float4 rasterFS(
 
     // glTF alpha: MASK drops fragments whose coverage is below the cutoff. BLEND has no sorted pass
     // yet, so it is shaded opaque; the coverage then goes unused.
-    uint  alphaMode = material.flags.z;
+    uint alphaMode = material.flags.z;
     if (alphaMode == alphaModeMask && surface.material.alpha < material.pbrMetallicRoughnessFactor.z)
         discard;
 
-    return float4(shadeRaster(surface, view), 1);
+    // The object id names the instance the fragment came from, one-based so the zero the clear leaves
+    // in unwritten pixels stays outside the instance range. It is the raster pass's answer to "what is
+    // under this pixel", for picking and segmentation; the object-id debug view colours the same index.
+    RasterOutput output;
+    output.color = float4(shadeRaster(surface, view), 1);
+    output.objectId = input.instanceIndex + 1;
+    return output;
 }
 
 // Fullscreen triangle for the windowed present pass. Three vertices at (-1,-1), (3,-1), (-1,3) cover
