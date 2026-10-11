@@ -47,31 +47,41 @@ uint32_t Scene::addMaterial(vec3 color, vec3 emission)
     return uint32_t(materials.size() - 1);
 }
 
-void Scene::addTriangle(vec3 a, vec3 b, vec3 c, uint32_t material)
-{
-    const vec3 cross = glm::cross(b - a, c - a);
-    assert(glm::dot(cross, cross) > 0.0f);
-
-    Triangle triangle = {};
-    triangle.p0 = vec4(a, 0);
-    triangle.p1 = vec4(b, 0);
-    triangle.p2 = vec4(c, 0);
-    triangle.n0 = triangle.n1 = triangle.n2 = vec4(glm::normalize(cross), 0);
-    looseTriangles.push_back(triangle);
-    looseMaterials.push_back(material);
-}
-
 void Scene::addQuad(vec3 a, vec3 b, vec3 c, vec3 d, uint32_t material)
 {
-    addTriangle(a, b, c, material);
-    addTriangle(a, c, d, material);
+    const vec3 normal = glm::normalize(glm::cross(b - a, c - a));
+
+    // A quad needs four vertices, not six: the two triangles share the edge a-c.
+    const uint32_t vertexBase = uint32_t(positions.size());
+    for (vec3 point : {a, b, c, d})
+    {
+        positions.push_back(point);
+        normals.push_back(normal);
+        baseColorUvs.push_back(vec2(0.0f));
+        metallicRoughnessUvs.push_back(vec2(0.0f));
+        normalUvs.push_back(vec2(0.0f));
+        occlusionUvs.push_back(vec2(0.0f));
+        emissiveUvs.push_back(vec2(0.0f));
+    }
+
+    const uint32_t first = uint32_t(indices.size());
+    indices.push_back(uvec3(0, 1, 2));
+    indices.push_back(uvec3(0, 2, 3));
+    addInstance(glm::mat4(1.0f), addPrimitive(first, 2, vertexBase, 4, material));
 }
 
-uint32_t Scene::addPrimitive(uint32_t firstTriangle, uint32_t triangleCount, uint32_t material)
+uint32_t Scene::addPrimitive(
+    uint32_t firstTriangle,
+    uint32_t triangleCount,
+    uint32_t vertexBase,
+    uint32_t vertexCount,
+    uint32_t material
+)
 {
     assert(triangleCount > 0);
-    assert(size_t(firstTriangle) + triangleCount <= triangles.size());
-    primitives.push_back(Primitive{firstTriangle, triangleCount, material, 0});
+    assert(size_t(firstTriangle) + triangleCount <= indices.size());
+    assert(size_t(vertexBase) + vertexCount <= positions.size());
+    primitives.push_back(Primitive{firstTriangle, triangleCount, material, vertexBase, vertexCount});
     return uint32_t(primitives.size() - 1);
 }
 
@@ -130,10 +140,11 @@ void Scene::computeBounds()
         const Primitive& primitive = primitives[instance.primitive];
         for (uint32_t k = 0; k < primitive.triangleCount; ++k)
         {
-            const Triangle& triangle = triangles[primitive.firstTriangle + k];
-            for (vec3 point : {vec3(triangle.p0), vec3(triangle.p1), vec3(triangle.p2)})
+            const glm::uvec3& triangle = indices[primitive.firstTriangle + k];
+            for (uint32_t corner : {triangle.x, triangle.y, triangle.z})
             {
-                const vec3 world = transformPoint(instance.transformRows, point);
+                const vec3 world =
+                    transformPoint(instance.transformRows, positions[primitive.vertexBase + corner]);
                 assert(std::isfinite(world.x) && std::isfinite(world.y) && std::isfinite(world.z));
                 lower = min(lower, world);
                 upper = max(upper, world);
@@ -163,14 +174,22 @@ bool Scene::setCurrentScene(int index)
 
 void Scene::resetDerived()
 {
-    triangles.clear();
+    positions.clear();
+    normals.clear();
+    baseColorUvs.clear();
+    metallicRoughnessUvs.clear();
+    normalUvs.clear();
+    occlusionUvs.clear();
+    emissiveUvs.clear();
+    indices.clear();
     primitives.clear();
     instances.clear();
     materials.clear();
     lights.clear();
-    texels.clear();
-    looseTriangles.clear();
-    looseMaterials.clear();
+    triangleLights.clear();
+    lightCdf.clear();
+    textures.clear();
+    samplers.clear();
 
     lower = upper = vec3(0.0f);
     eye = vec3(0.0f, 1.0f, 3.6f);

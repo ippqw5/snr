@@ -1,5 +1,7 @@
 #include "./device.h"
 
+#include "shaders/scene_io.h.slang"
+
 #include <cstdio>
 #include <filesystem>
 #include <stdexcept>
@@ -77,11 +79,19 @@ DeviceContext::DeviceContext(const std::filesystem::path& shaderDir, bool valida
     desc.slang.searchPathCount = 1;
     desc.slang.targetProfile = "spirv_1_5";
     desc.slang.optimizationLevel = SlangOptimizationLevel::SLANG_OPTIMIZATION_LEVEL_MAXIMAL;
+    // The shader addresses textures and samplers through the bindless heap, so the pool is sized from
+    // the same limits the shader's handle arrays are declared with.
+    desc.bindless.textureCount = snr::SNR_MAX_TEXTURES;
+    desc.bindless.samplerCount = snr::SNR_MAX_SAMPLERS;
     checkRhi(api->createDevice(desc, m_device.writeRef()), "create Vulkan device");
 
     if (!m_device->hasFeature(Feature::RayQuery))
     {
         throw std::runtime_error("Vulkan device does not support hardware ray queries");
+    }
+    if (!m_device->hasFeature(Feature::Bindless))
+    {
+        throw std::runtime_error("Vulkan device does not support bindless descriptors");
     }
 
     m_queue = m_device->getQueue(QueueType::Graphics);

@@ -72,9 +72,49 @@ std::string join(const std::vector<std::string>& values)
     return result;
 }
 
-float srgbToLinear(float value)
+TextureWrap toTextureWrap(int mode)
 {
-    return value <= 0.04045f ? value / 12.92f : std::pow((value + 0.055f) / 1.055f, 2.4f);
+    switch (mode)
+    {
+    case clampToEdge:
+        return TextureWrap::ClampToEdge;
+    case mirroredRepeat:
+        return TextureWrap::MirrorRepeat;
+    default:
+        return TextureWrap::Repeat;
+    }
+}
+
+// Box-filter downsampling to half size, rounding odd dimensions up and clamping the source indices so
+// the last destination texel still covers edge pixels. `width`/`height` are the source dimensions;
+// the result dimensions are written back through the same names.
+std::vector<unsigned char> downsample(const std::vector<unsigned char>& source, int& width, int& height)
+{
+    const int sourceWidth = width;
+    const int sourceHeight = height;
+    width = std::max(1, sourceWidth / 2);
+    height = std::max(1, sourceHeight / 2);
+
+    std::vector<unsigned char> result(size_t(width) * size_t(height) * 4);
+    for (int y = 0; y < height; ++y)
+    {
+        const int y0 = std::min(y * 2, sourceHeight - 1);
+        const int y1 = std::min(y * 2 + 1, sourceHeight - 1);
+        for (int x = 0; x < width; ++x)
+        {
+            const int x0 = std::min(x * 2, sourceWidth - 1);
+            const int x1 = std::min(x * 2 + 1, sourceWidth - 1);
+            for (int c = 0; c < 4; ++c)
+            {
+                const unsigned sum = source[(size_t(y0) * sourceWidth + x0) * 4 + c] +
+                                     source[(size_t(y0) * sourceWidth + x1) * 4 + c] +
+                                     source[(size_t(y1) * sourceWidth + x0) * 4 + c] +
+                                     source[(size_t(y1) * sourceWidth + x1) * 4 + c];
+                result[(size_t(y) * width + x) * 4 + c] = (unsigned char)((sum + 2) / 4);
+            }
+        }
+    }
+    return result;
 }
 
 const tinygltf::Value* extension(const tinygltf::ExtensionMap& extensions, const char* name)
@@ -445,11 +485,11 @@ bool GltfImporter::selectScene()
 bool GltfImporter::import(int sceneIndex)
 {
     // One importer outlives one derivation, so every cache that refers to the scene built last time
-    // has to be dropped: resetDerived has just emptied the materials, texels and primitives they
+    // has to be dropped: resetDerived has just emptied the materials, textures and primitives they
     // point into.
     m_bindings.clear();
     m_materialIds.clear();
-    m_texelBlocks.clear();
+    m_textureBlocks.clear();
     m_primitiveCache.clear();
     m_ignored.clear();
     m_defaultBindings = MaterialBindings{};
@@ -476,7 +516,7 @@ bool GltfImporter::import(int sceneIndex)
     if (m_degenerateTriangles > 0)
         warn("Skipped " + std::to_string(m_degenerateTriangles) + " degenerate glTF triangles");
 
-    if (m_scene->triangles.empty())
+    if (m_scene->indices.empty())
     {
         fail("glTF scene has no triangles to render");
         return false;
@@ -611,7 +651,40 @@ uint32_t GltfImporter::buildPrimitive(const tinygltf::Primitive& primitive)
         return uv.empty() ? glm::vec2(0.0f) : uv[index];
     };
 
-    const uint32_t first = uint32_t(m_scene->triangles.size());
+    // Each primitive gets its own contiguous window of the shared vertex arrays, holding only the
+    // vertices a surviving triangle references (remap[corner] is that vertex's id within the window),
+    // so the window never exceeds three times the triangle count. That bound is what lets the
+    // acceleration structure build recover the triangle count from the vertex and index counts.
+    const uint32_t vertexBase = uint32_t(m_scene->positions.size());
+    std::vector<uint32_t> remap(vertexCount, uint32_t(-1));
+    const auto localVertex = [&](uint32_t corner) {
+        uint32_t& slot = remap[corner];
+        if (slot == uint32_t(-1))
+        {
+            slot = uint32_t(m_scene->positions.size()) - vertexBase;
+            const size_t offset = size_t(corner) * 3;
+            m_scene->positions.push_back(vec3(positions[offset], positions[offset + 1], positions[offset + 2]));
+
+            vec3 normal(0.0f);
+            if (!normals.empty())
+            {
+                const vec3 attributed(normals[offset], normals[offset + 1], normals[offset + 2]);
+                // A zero normal is left as-is; the shader then falls back to the geometric normal.
+                if (glm::dot(attributed, attributed) > 0.0f)
+                    normal = glm::normalize(attributed);
+            }
+            m_scene->normals.push_back(normal);
+
+            m_scene->baseColorUvs.push_back(uvAt(baseUv, corner));
+            m_scene->metallicRoughnessUvs.push_back(uvAt(roughnessUv, corner));
+            m_scene->normalUvs.push_back(uvAt(normalUv, corner));
+            m_scene->occlusionUvs.push_back(uvAt(occlusionUv, corner));
+            m_scene->emissiveUvs.push_back(uvAt(emissiveUv, corner));
+        }
+        return slot;
+    };
+
+    const uint32_t first = uint32_t(m_scene->indices.size());
     for (size_t i = 0; i + 2 < corners.size(); i += 3)
     {
         const uint32_t corner[3] = {corners[i], corners[i + 1], corners[i + 2]};
@@ -622,48 +695,35 @@ uint32_t GltfImporter::buildPrimitive(const tinygltf::Primitive& primitive)
             points[v] = vec3(positions[offset], positions[offset + 1], positions[offset + 2]);
         }
 
+        // Degeneracy is judged on the source positions, so a primitive that is all degenerate
+        // stores no vertices at all.
         const vec3 crossProduct = glm::cross(points[1] - points[0], points[2] - points[0]);
-        // A zero cross product has no direction and would normalize to NaN.
         if (glm::dot(crossProduct, crossProduct) <= 0.0f)
         {
             ++m_degenerateTriangles;
             continue;
         }
-        const vec3 geometric = glm::normalize(crossProduct);
 
-        vec3 shading[3];
-        for (size_t v = 0; v < 3; ++v)
-        {
-            vec3 normal = geometric;
-            if (!normals.empty())
-            {
-                const size_t offset = size_t(corner[v]) * 3;
-                const vec3   attributed(normals[offset], normals[offset + 1], normals[offset + 2]);
-                if (glm::dot(attributed, attributed) > 0.0f)
-                    normal = glm::normalize(attributed);
-            }
-            shading[v] = normal;
-        }
-
-        Triangle triangle = {};
-        triangle.p0 = vec4(points[0], 0.0f);
-        triangle.p1 = vec4(points[1], 0.0f);
-        triangle.p2 = vec4(points[2], 0.0f);
-        triangle.n0 = vec4(shading[0], 0.0f);
-        triangle.n1 = vec4(shading[1], 0.0f);
-        triangle.n2 = vec4(shading[2], 0.0f);
-        triangle.baseColorUv01 = vec4(uvAt(baseUv, corner[0]), uvAt(baseUv, corner[1]));
-        triangle.baseColorUv2 = vec4(uvAt(baseUv, corner[2]), 0.0f, 0.0f);
-        triangle.metallicRoughnessUv01 =
-            vec4(uvAt(roughnessUv, corner[0]), uvAt(roughnessUv, corner[1]));
-        triangle.metallicRoughnessUv2 = vec4(uvAt(roughnessUv, corner[2]), 0.0f, 0.0f);
-        m_scene->triangles.push_back(triangle);
+        m_scene->indices.push_back(
+            uvec3(localVertex(corner[0]), localVertex(corner[1]), localVertex(corner[2]))
+        );
     }
 
-    if (m_scene->triangles.size() == first)
+    if (m_scene->indices.size() == first)
+    {
+        // No triangle survived, so the vertices appended above are unused: drop them again.
+        m_scene->positions.resize(vertexBase);
+        m_scene->normals.resize(vertexBase);
+        m_scene->baseColorUvs.resize(vertexBase);
+        m_scene->metallicRoughnessUvs.resize(vertexBase);
+        m_scene->normalUvs.resize(vertexBase);
+        m_scene->occlusionUvs.resize(vertexBase);
+        m_scene->emissiveUvs.resize(vertexBase);
         return badPrimitive;
+    }
 
-    return m_scene->addPrimitive(first, uint32_t(m_scene->triangles.size()) - first, material);
+    const uint32_t stored = uint32_t(m_scene->positions.size()) - vertexBase;
+    return m_scene->addPrimitive(first, uint32_t(m_scene->indices.size()) - first, vertexBase, stored, material);
 }
 
 bool GltfImporter::readUv(
@@ -826,41 +886,38 @@ int GltfImporter::imageOf(const tinygltf::Texture& texture)
     return texture.source;
 }
 
-bool GltfImporter::texelsFor(int imageIndex, bool srgb, TexelBlock& block)
+int GltfImporter::textureFor(int imageIndex, bool srgb)
 {
     const uint64_t key = (uint64_t(uint32_t(imageIndex)) << 1) | uint64_t(srgb ? 1 : 0);
-    if (const auto found = m_texelBlocks.find(key); found != m_texelBlocks.end())
-    {
-        block = found->second;
-        return block.offset != badTexel;
-    }
+    if (const auto found = m_textureBlocks.find(key); found != m_textureBlocks.end())
+        return found->second;
 
-    const auto remember = [this, key](TexelBlock value) {
-        m_texelBlocks.emplace(key, value);
+    const auto remember = [this, key](int value) {
+        m_textureBlocks.emplace(key, value);
         return value;
     };
     const auto reject = [&remember](const char* message) {
-        remember(TexelBlock{badTexel, 0, 0});
+        remember(-1);
         return message;
     };
 
     const tinygltf::Image* image = check(m_model->images, imageIndex, "image");
     if (!image)
-        return remember(TexelBlock{badTexel, 0, 0}), false;
+        return remember(-1);
     if (image->width <= 0 || image->height <= 0)
     {
         fail(reject("Invalid glTF image size"));
-        return false;
+        return -1;
     }
     if (image->component != 4)
     {
         fail(reject("Expected a decoded RGBA glTF image"));
-        return false;
+        return -1;
     }
     if (image->bits != 8 && image->bits != 16)
     {
         fail(reject("Unsupported glTF image bit depth"));
-        return false;
+        return -1;
     }
 
     const size_t bytesPerComponent = size_t(image->bits) / 8;
@@ -868,60 +925,69 @@ bool GltfImporter::texelsFor(int imageIndex, bool srgb, TexelBlock& block)
     if (image->image.size() < pixelCount * 4 * bytesPerComponent)
     {
         fail(reject("Truncated glTF image data"));
-        return false;
+        return -1;
     }
-
-    TexelBlock result;
-    result.offset = m_scene->texels.size();
-    result.width = image->width;
-    result.height = image->height;
-    if (result.offset + pixelCount > size_t(INT32_MAX))
+    if (m_scene->textures.size() >= size_t(SNR_MAX_TEXTURES))
     {
-        fail(reject("Texture data exceeds the addressable texel range"));
-        return false;
+        fail(reject("The model uses more textures than the bindless heap holds"));
+        return -1;
     }
 
-    m_scene->texels.resize(result.offset + pixelCount);
-    const unsigned char* data = image->image.data();
-    for (size_t pixel = 0; pixel < pixelCount; ++pixel)
+    // Level 0 is tightly packed RGBA8. An sRGB texture keeps its encoded values and relies on the sRGB
+    // texture format to linearise on sample, so colour and data textures share this one code path.
+    TextureData                texture;
+    texture.width = image->width;
+    texture.height = image->height;
+    texture.srgb = srgb;
+    std::vector<unsigned char>& level = texture.levels.emplace_back(pixelCount * 4);
+    const unsigned char*        data = image->image.data();
+    if (bytesPerComponent == 2)
     {
-        const size_t base = pixel * 4 * bytesPerComponent;
-        float        channels[4] = {0.0f, 0.0f, 0.0f, 1.0f};
-        for (size_t c = 0; c < 4; ++c)
-        {
-            if (bytesPerComponent == 2)
-            {
-                const size_t offset = base + c * 2;
-                channels[c] = float(uint16_t(data[offset]) | (uint16_t(data[offset + 1]) << 8)) / 65535.0f;
-            }
-            else
-            {
-                channels[c] = float(data[base + c]) / 255.0f;
-            }
-        }
-
-        vec4 texel(channels[0], channels[1], channels[2], channels[3]);
-        if (srgb)
-            texel = vec4(srgbToLinear(texel.r), srgbToLinear(texel.g), srgbToLinear(texel.b), texel.a);
-        m_scene->texels[result.offset + pixel] = texel;
+        for (size_t i = 0; i < pixelCount * 4; ++i)
+            level[i] = (unsigned char)((unsigned(data[i * 2]) | (unsigned(data[i * 2 + 1]) << 8)) / 257);
+    }
+    else
+    {
+        std::memcpy(level.data(), data, pixelCount * 4);
     }
 
-    block = remember(result);
-    return true;
+    // Build the full mip chain so the ray-cone LOD selection has levels to choose from.
+    int width = texture.width;
+    int height = texture.height;
+    while (width > 1 || height > 1)
+        texture.levels.push_back(downsample(texture.levels.back(), width, height));
+
+    const int index = int(m_scene->textures.size());
+    m_scene->textures.push_back(std::move(texture));
+    return remember(index);
+}
+
+int GltfImporter::samplerFor(const TextureSampler& sampler)
+{
+    const auto found = std::find(m_scene->samplers.begin(), m_scene->samplers.end(), sampler);
+    if (found != m_scene->samplers.end())
+        return int(found - m_scene->samplers.begin());
+    if (m_scene->samplers.size() >= size_t(SNR_MAX_SAMPLERS))
+    {
+        warn("The model uses more samplers than the bindless heap holds; using the first sampler");
+        return 0;
+    }
+    m_scene->samplers.push_back(sampler);
+    return int(m_scene->samplers.size() - 1);
 }
 
 void GltfImporter::bindTexture(
     const tinygltf::TextureInfo& info,
     bool                         srgb,
     TextureCoordinates&          coordinates,
-    ivec4&                       texture,
-    uvec4&                       sampler
+    int&                         texture,
+    int&                         sampler
 )
 {
-    // An absent texture leaves the slot empty. The shader treats a negative offset as "no texture"
-    // and samples white, so the material factor is then used on its own.
-    texture = ivec4(-1, 0, 0, 0);
-    sampler = uvec4(repeat, repeat, 0, 0);
+    // An absent texture leaves the slot empty. The shader treats a negative index as "no texture" and
+    // samples white, so the material factor is then used on its own.
+    texture = -1;
+    sampler = 0;
     if (info.index < 0)
         return;
 
@@ -931,14 +997,15 @@ void GltfImporter::bindTexture(
     if (!source)
         return;
 
-    int wrapS = repeat, wrapT = repeat, filter = 0;
+    int  wrapS = repeat, wrapT = repeat;
+    bool pointSample = false;
     if (source->sampler >= 0)
     {
         if (const tinygltf::Sampler* gltfSampler = check(m_model->samplers, source->sampler, "sampler"))
         {
             wrapS = gltfSampler->wrapS;
             wrapT = gltfSampler->wrapT;
-            filter = gltfSampler->magFilter == nearest ? 1 : 0;
+            pointSample = gltfSampler->magFilter == nearest;
         }
     }
     if (!validWrap(wrapS) || !validWrap(wrapT))
@@ -952,22 +1019,21 @@ void GltfImporter::bindTexture(
     if (imageIndex < 0)
         return;
 
-    TexelBlock block;
-    if (!texelsFor(imageIndex, srgb, block))
+    const int index = textureFor(imageIndex, srgb);
+    if (index < 0)
         return;
 
-    texture = ivec4(int(block.offset), block.width, block.height, 0);
-    sampler = uvec4(uint32_t(wrapS), uint32_t(wrapT), uint32_t(filter), 0);
+    TextureSampler state;
+    state.wrapU = toTextureWrap(wrapS);
+    state.wrapV = toTextureWrap(wrapT);
+    state.nearest = pointSample;
+
+    texture = index;
+    sampler = samplerFor(state);
 }
 
 void GltfImporter::reportUnsupportedMaterial(const tinygltf::Material& material)
 {
-    if (material.emissiveTexture.index >= 0)
-        ignore("emissive textures");
-    if (material.normalTexture.index >= 0)
-        ignore("normal maps");
-    if (material.occlusionTexture.index >= 0)
-        ignore("occlusion maps");
     if (material.alphaMode != "OPAQUE")
         ignore("alpha modes other than OPAQUE (" + material.alphaMode + ")");
 }

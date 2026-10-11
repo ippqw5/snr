@@ -12,13 +12,45 @@ struct Hit
     float2 bary;
 };
 
+// The vertex attributes of one triangle, gathered from the shared arrays below. Positions, normals
+// and UVs are each stored once per vertex, so a vertex shared by several triangles is read once from
+// every triangle that uses it. This type is local to the shader: only the id list crosses the
+// host/device boundary, so the arrays keep their tight element sizes.
+struct Triangle
+{
+    float3 p0, p1, p2;
+    float3 n0, n1, n2;
+    float2 baseColorUv0, baseColorUv1, baseColorUv2;
+    float2 metallicRoughnessUv0, metallicRoughnessUv1, metallicRoughnessUv2;
+    float2 normalUv0, normalUv1, normalUv2;
+    float2 occlusionUv0, occlusionUv1, occlusionUv2;
+    float2 emissiveUv0, emissiveUv1, emissiveUv2;
+};
+
 RaytracingAccelerationStructure sceneBVH;
-StructuredBuffer<Triangle> triangles;
+StructuredBuffer<float3> positions;
+StructuredBuffer<float3> normals;
+StructuredBuffer<float2> baseColorUvs;
+StructuredBuffer<float2> metallicRoughnessUvs;
+StructuredBuffer<float2> normalUvs;
+StructuredBuffer<float2> occlusionUvs;
+StructuredBuffer<float2> emissiveUvs;
+StructuredBuffer<uint3> indices;
 StructuredBuffer<Primitive> primitives;
 StructuredBuffer<Instance> instances;
 StructuredBuffer<GltfMaterial> materials;
 StructuredBuffer<Light> lights;
-StructuredBuffer<float4> texels;
+// Per instance, one entry per triangle of its primitive: the light it maps to, or -1 when the triangle
+// is not in the light list. Lets a textured emitter keep only the triangles its texture makes bright.
+StructuredBuffer<int> triangleLights;
+// Cumulative power of the lights, one entry per light plus a leading zero and a trailing total. Light
+// sampling reads it so bright lights are picked more often than dim ones.
+StructuredBuffer<float> lightCdf;
+// Bindless texture and sampler heaps. The .Handle element is a 64-bit index into slang-rhi's
+// bindless descriptor set, so a material names a texture and a sampler by slot and the texture unit
+// does the wrapping, filtering and mip selection; see sampleTexture() below.
+uniform Texture2D<float4>.Handle images[SNR_MAX_TEXTURES];
+uniform SamplerState.Handle samplers[SNR_MAX_SAMPLERS];
 ConstantBuffer<Params> params;
 
 float3 transformPoint(Instance instance, float3 point)
@@ -37,22 +69,47 @@ float3 transformNormal(Instance instance, float3 normal)
 
 Triangle triangleAt(Instance instance, uint localTriangle)
 {
-    return triangles[primitives[instance.primitive].firstTriangle + localTriangle];
+    Primitive primitive = primitives[instance.primitive];
+    const uint3 ids = indices[primitive.firstTriangle + localTriangle] + primitive.vertexBase;
+
+    Triangle triangle;
+    triangle.p0 = positions[ids.x];
+    triangle.p1 = positions[ids.y];
+    triangle.p2 = positions[ids.z];
+    triangle.n0 = normals[ids.x];
+    triangle.n1 = normals[ids.y];
+    triangle.n2 = normals[ids.z];
+    triangle.baseColorUv0 = baseColorUvs[ids.x];
+    triangle.baseColorUv1 = baseColorUvs[ids.y];
+    triangle.baseColorUv2 = baseColorUvs[ids.z];
+    triangle.metallicRoughnessUv0 = metallicRoughnessUvs[ids.x];
+    triangle.metallicRoughnessUv1 = metallicRoughnessUvs[ids.y];
+    triangle.metallicRoughnessUv2 = metallicRoughnessUvs[ids.z];
+    triangle.normalUv0 = normalUvs[ids.x];
+    triangle.normalUv1 = normalUvs[ids.y];
+    triangle.normalUv2 = normalUvs[ids.z];
+    triangle.occlusionUv0 = occlusionUvs[ids.x];
+    triangle.occlusionUv1 = occlusionUvs[ids.y];
+    triangle.occlusionUv2 = occlusionUvs[ids.z];
+    triangle.emissiveUv0 = emissiveUvs[ids.x];
+    triangle.emissiveUv1 = emissiveUvs[ids.y];
+    triangle.emissiveUv2 = emissiveUvs[ids.z];
+    return triangle;
 }
 
 // World-space normal taken from the transformed edges, so mirrored instances still face correctly.
 float3 geometricNormal(Instance instance, Triangle triangle)
 {
-    float3 a = transformPoint(instance, triangle.p0.xyz);
-    float3 b = transformPoint(instance, triangle.p1.xyz);
-    float3 c = transformPoint(instance, triangle.p2.xyz);
+    float3 a = transformPoint(instance, triangle.p0);
+    float3 b = transformPoint(instance, triangle.p1);
+    float3 c = transformPoint(instance, triangle.p2);
     return normalize(cross(b - a, c - a));
 }
 
 // Index of the world-space light a hit emitted from, or -1 when it is not an emitter.
 int lightIndexOf(Instance instance, uint localTriangle)
 {
-    return instance.lightBase == 0xffffffffu ? -1 : int(instance.lightBase + localTriangle);
+    return instance.lightBase == 0xffffffffu ? -1 : triangleLights[instance.lightBase + localTriangle];
 }
 
 bool traceScene(float3 origin, float3 direction, float tMax, bool anyHit, out Hit hit)
@@ -154,19 +211,24 @@ struct SurfaceInteraction
     SurfaceMaterial material;
 };
 
-SurfaceInteraction surfaceAt(Instance instance, Triangle triangle, GltfMaterial material, float2 bary, float3 wo)
+SurfaceInteraction surfaceAt(Instance instance, Triangle triangle, GltfMaterial material, float2 bary, float3 wo, float footprint)
 {
     SurfaceInteraction surface = {};
 
     // Interpolating in object space and transforming once is equivalent to transforming the
     // vertices, because the placement is affine.
-    float3 objectPosition = triangle.p0.xyz * (1 - bary.x - bary.y) + triangle.p1.xyz * bary.x + triangle.p2.xyz * bary.y;
+    float3 objectPosition = triangle.p0 * (1 - bary.x - bary.y) + triangle.p1 * bary.x + triangle.p2 * bary.y;
     surface.position = transformPoint(instance, objectPosition);
 
     float3 ng = geometricNormal(instance, triangle);
     float3 normal = transformNormal(instance,
-        triangle.n0.xyz * (1 - bary.x - bary.y) + triangle.n1.xyz * bary.x + triangle.n2.xyz * bary.y);
+        triangle.n0 * (1 - bary.x - bary.y) + triangle.n1 * bary.x + triangle.n2 * bary.y);
     normal = dot(normal, normal) > 1e-12 ? normalize(normal) : ng;
+    if (dot(normal, ng) < 0)
+        normal = -normal;
+    // Perturb the interpolated normal with the normal map, in the same orientation.
+    normal = applyNormalMap(normal, material, triangle, instance, bary, footprint);
+    // A perturbed normal can tilt past the surface plane; keep it on the side geometry faces.
     if (dot(normal, ng) < 0)
         normal = -normal;
     if (dot(ng, wo) < 0)

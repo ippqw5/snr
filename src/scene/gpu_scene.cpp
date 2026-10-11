@@ -10,50 +10,140 @@ namespace snr
 {
 using namespace rhi;
 
+namespace
+{
+TextureAddressingMode toAddressing(TextureWrap wrap)
+{
+    switch (wrap)
+    {
+    case TextureWrap::ClampToEdge:
+        return TextureAddressingMode::ClampToEdge;
+    case TextureWrap::MirrorRepeat:
+        return TextureAddressingMode::MirrorRepeat;
+    default:
+        return TextureAddressingMode::Wrap;
+    }
+}
+} // namespace
+
 GpuScene::GpuScene(DeviceContext& context, const Scene& scene)
     : m_lightCount(uint32_t(scene.lights.size()))
 {
-    if (scene.triangles.empty() || scene.primitives.empty() || scene.instances.empty())
+    if (scene.indices.empty() || scene.primitives.empty() || scene.instances.empty())
     {
         throw std::runtime_error("cannot upload an empty scene to gpu");
     }
 
     auto* device = context.device();
 
-    // One shared vertex buffer holding every primitive, three vertices per triangle in primitive
-    // order. Each bottom-level structure covers its own slice through a buffer offset.
-    std::vector<glm::vec3> vertices;
-    vertices.reserve(scene.triangles.size() * 3);
-    for (const Triangle& triangle : scene.triangles)
-    {
-        vertices.push_back(glm::vec3(triangle.p0));
-        vertices.push_back(glm::vec3(triangle.p1));
-        vertices.push_back(glm::vec3(triangle.p2));
-    }
-    m_vertices = makeBuffer(
+    // The positions and indices are shared with the acceleration structures: the same data the
+    // traversal reads is what the shader indexes, so no second copy is uploaded and the elements keep
+    // their tight glTF sizes (float3 is 12 bytes) instead of being padded to float4.
+    const BufferUsage geometryUsage =
+        BufferUsage::ShaderResource | BufferUsage::AccelerationStructureBuildInput;
+    m_positions = makeBuffer(
         device,
-        vertices.size() * sizeof(glm::vec3),
+        scene.positions.size() * sizeof(glm::vec3),
         sizeof(glm::vec3),
-        BufferUsage::AccelerationStructureBuildInput,
-        ResourceState::AccelerationStructureBuildInput,
-        vertices.data()
+        geometryUsage,
+        ResourceState::ShaderResource,
+        scene.positions.data()
     );
+    m_indices = makeBuffer(
+        device,
+        scene.indices.size() * sizeof(glm::uvec3),
+        sizeof(glm::uvec3),
+        geometryUsage,
+        ResourceState::ShaderResource,
+        scene.indices.data()
+    );
+    m_normals = upload(device, scene.normals);
+    m_baseColorUvs = upload(device, scene.baseColorUvs);
+    m_metallicRoughnessUvs = upload(device, scene.metallicRoughnessUvs);
+    m_normalUvs = upload(device, scene.normalUvs);
+    m_occlusionUvs = upload(device, scene.occlusionUvs);
+    m_emissiveUvs = upload(device, scene.emissiveUvs);
 
     buildAccelerationStructures(context, scene);
 
-    m_triangles = upload(device, scene.triangles);
     m_primitives = upload(device, scene.primitives);
     m_instances = upload(device, scene.instances);
     m_materials = upload(device, scene.materials);
     m_lights = upload(device, scene.lights);
-    m_texels = upload(device, scene.texels);
+    m_triangleLights = upload(device, scene.triangleLights);
+    m_lightCdf = upload(device, scene.lightCdf);
+
+    // Each image becomes one hardware texture with its full mip chain, and each distinct sampler
+    // state one sampler object. The material records name them by index, so the shader's bindless
+    // arrays are filled in the same order the importer registered them.
+    m_textures.reserve(scene.textures.size());
+    m_textureViews.reserve(scene.textures.size());
+    m_textureHandles.reserve(scene.textures.size());
+    for (const TextureData& source : scene.textures)
+    {
+        TextureDesc desc = {};
+        desc.type = TextureType::Texture2D;
+        desc.size = {uint32_t(source.width), uint32_t(source.height), 1};
+        desc.mipCount = uint32_t(source.levels.size());
+        desc.format = source.srgb ? Format::RGBA8UnormSrgb : Format::RGBA8Unorm;
+        desc.usage = TextureUsage::ShaderResource;
+
+        // Subresources run mip-major; a plain 2D texture has one subresource per level.
+        std::vector<SubresourceData> subresources(source.levels.size());
+        for (size_t level = 0; level < source.levels.size(); ++level)
+        {
+            const uint32_t width = std::max(1u, uint32_t(source.width) >> level);
+            subresources[level].data = source.levels[level].data();
+            subresources[level].rowPitch = width * 4;
+            subresources[level].slicePitch = 0;
+        }
+
+        ComPtr<ITexture> image;
+        checkRhi(device->createTexture(desc, subresources.data(), image.writeRef()), "create texture");
+        ComPtr<ITextureView> view;
+        checkRhi(image->createView({}, view.writeRef()), "create texture view");
+        DescriptorHandle handle = {};
+        checkRhi(view->getDescriptorHandle(DescriptorHandleAccess::Read, &handle), "texture descriptor handle");
+
+        m_textures.push_back(image);
+        m_textureViews.push_back(view);
+        m_textureHandles.push_back(handle);
+    }
+
+    m_samplers.reserve(scene.samplers.size());
+    m_samplerHandles.reserve(scene.samplers.size());
+    for (const TextureSampler& source : scene.samplers)
+    {
+        const TextureFilteringMode filter =
+            source.nearest ? TextureFilteringMode::Point : TextureFilteringMode::Linear;
+
+        SamplerDesc desc = {};
+        desc.minFilter = filter;
+        desc.magFilter = filter;
+        desc.mipFilter = filter;
+        desc.addressU = toAddressing(source.wrapU);
+        desc.addressV = toAddressing(source.wrapV);
+        desc.addressW = desc.addressU;
+
+        ComPtr<ISampler> sampler;
+        checkRhi(device->createSampler(desc, sampler.writeRef()), "create sampler");
+        DescriptorHandle handle = {};
+        checkRhi(sampler->getDescriptorHandle(&handle), "sampler descriptor handle");
+
+        m_samplers.push_back(sampler);
+        m_samplerHandles.push_back(handle);
+    }
 
     std::printf(
-        "Scene: %zu triangles, %zu primitives, %zu instances, %zu materials, %zu emissive triangles",
-        scene.triangles.size(),
+        "Scene: %zu triangles, %zu vertices, %zu primitives, %zu instances, %zu materials, %zu textures, "
+        "%zu samplers, %zu emissive triangles",
+        scene.indices.size(),
+        scene.positions.size(),
         scene.primitives.size(),
         scene.instances.size(),
         scene.materials.size(),
+        scene.textures.size(),
+        scene.samplers.size(),
         scene.lights.size()
     );
     std::fflush(stdout);
@@ -80,14 +170,25 @@ void GpuScene::buildAccelerationStructures(DeviceContext& context, const Scene& 
         // is alive for the build call that consumes it.
         AccelerationStructureBuildInput input = {};
         input.type = AccelerationStructureBuildInputType::Triangles;
+        // Every primitive shares the one vertex buffer, so only this primitive's window of it is
+        // described: the vertex data starts at vertexBase, and maxVertex (derived by the backend from
+        // vertexCount) must stay inside the window or the index buffer would be read out of range.
         input.triangles.vertexBuffers[0] = BufferOffsetPair(
-            m_vertices.get(),
-            Offset(size_t(primitive.firstTriangle) * 3 * sizeof(glm::vec3))
+            m_positions.get(),
+            Offset(size_t(primitive.vertexBase) * sizeof(glm::vec3))
         );
         input.triangles.vertexBufferCount = 1;
         input.triangles.vertexFormat = Format::RGB32Float;
-        input.triangles.vertexCount = primitive.triangleCount * 3;
+        input.triangles.vertexCount = primitive.vertexCount;
         input.triangles.vertexStride = sizeof(glm::vec3);
+        // Each index is a uint32, so triangle t starts at index (firstTriangle + t) * 3. The indices
+        // are local to this primitive's window, which is why a distinct vertex base is needed.
+        input.triangles.indexBuffer = BufferOffsetPair(
+            m_indices.get(),
+            Offset(size_t(primitive.firstTriangle) * 3 * sizeof(uint32_t))
+        );
+        input.triangles.indexFormat = IndexFormat::Uint32;
+        input.triangles.indexCount = primitive.triangleCount * 3;
         input.triangles.flags = AccelerationStructureGeometryFlags::None;
 
         AccelerationStructureBuildDesc desc = {};
@@ -194,11 +295,29 @@ void GpuScene::buildAccelerationStructures(DeviceContext& context, const Scene& 
 void GpuScene::bind(const ShaderCursor& root) const
 {
     checkRhi(root["sceneBVH"].setBinding(m_tlas), "bind scene BVH");
-    checkRhi(root["triangles"].setBinding(m_triangles), "bind triangles");
+    checkRhi(root["positions"].setBinding(m_positions), "bind positions");
+    checkRhi(root["normals"].setBinding(m_normals), "bind normals");
+    checkRhi(root["baseColorUvs"].setBinding(m_baseColorUvs), "bind base color uvs");
+    checkRhi(root["metallicRoughnessUvs"].setBinding(m_metallicRoughnessUvs), "bind metallic-roughness uvs");
+    checkRhi(root["normalUvs"].setBinding(m_normalUvs), "bind normal uvs");
+    checkRhi(root["occlusionUvs"].setBinding(m_occlusionUvs), "bind occlusion uvs");
+    checkRhi(root["emissiveUvs"].setBinding(m_emissiveUvs), "bind emissive uvs");
+    checkRhi(root["indices"].setBinding(m_indices), "bind indices");
     checkRhi(root["primitives"].setBinding(m_primitives), "bind primitives");
     checkRhi(root["instances"].setBinding(m_instances), "bind instances");
     checkRhi(root["materials"].setBinding(m_materials), "bind materials");
     checkRhi(root["lights"].setBinding(m_lights), "bind lights");
-    checkRhi(root["texels"].setBinding(m_texels), "bind texels");
+    checkRhi(root["triangleLights"].setBinding(m_triangleLights), "bind triangle lights");
+    checkRhi(root["lightCdf"].setBinding(m_lightCdf), "bind light cdf");
+
+    // The bindless heaps are plain arrays of handles, so each texture and sampler is written into the
+    // slot its index names.
+    auto images = root["images"];
+    for (size_t index = 0; index < m_textureHandles.size(); ++index)
+        checkRhi(images[uint32_t(index)].setDescriptorHandle(m_textureHandles[index]), "bind texture");
+
+    auto samplers = root["samplers"];
+    for (size_t index = 0; index < m_samplerHandles.size(); ++index)
+        checkRhi(samplers[uint32_t(index)].setDescriptorHandle(m_samplerHandles[index]), "bind sampler");
 }
 } // namespace snr

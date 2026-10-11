@@ -36,27 +36,27 @@ using uint4 = glm::uvec4;
 
 SNR_IO_BEGIN()
 
-// Float4 fields give the host and Slang identical structured-buffer layout.
-// The UV fields hold one coordinate pair per triangle corner: .xy and .zw for corners 0 and 1,
-// then .xy for corner 2. Each field is named after the material texture slot it feeds.
-struct Triangle
-{
-    float4 p0, p1, p2;
-    float4 n0, n1, n2;
-    float4 baseColorUv01, baseColorUv2;
-    float4 metallicRoughnessUv01, metallicRoughnessUv2;
-};
-SNR_IO_STATIC_ASSERT(sizeof(Triangle) == 160);
+// Vertex attributes are not a struct: positions/normals/UVs/indices are each bound as their own
+// typed array. Each primitive owns a contiguous window of the vertex arrays, and its indices are
+// local to that window, so the arrays keep the tight glTF element sizes (float3 is 12 bytes, float2
+// is 8) instead of being padded to float4 -- the padding was only ever needed to make a float3
+// struct member unambiguous.
 
-// A unique primitive: one triangle range in object space with a single material.
+// A unique primitive: one triangle range in object space with a single material, drawing on a
+// contiguous window [vertexBase, vertexBase + vertexCount) of the shared vertex arrays.
+// firstTriangle is an ordinal in the global index buffer, so its first index is firstTriangle * 3,
+// and each index there is an offset from vertexBase. The window exists because the acceleration
+// structure build derives a primitive's triangle count from its vertex and index counts, so a
+// primitive must not reference vertices beyond its own triangles.
 struct Primitive
 {
     uint firstTriangle;
     uint triangleCount;
     uint material;
-    uint reserved;
+    uint vertexBase;
+    uint vertexCount;
 };
-SNR_IO_STATIC_ASSERT(sizeof(Primitive) == 16);
+SNR_IO_STATIC_ASSERT(sizeof(Primitive) == 20);
 
 // Places one primitive in the world. The matrix rows are spelled out so the host and Slang agree on
 // layout without relying on either side's matrix convention.
@@ -71,36 +71,53 @@ struct Instance
 };
 SNR_IO_STATIC_ASSERT(sizeof(Instance) == 112);
 
-// A world-space emissive triangle, used for next-event estimation.
+// A world-space emissive triangle, used for next-event estimation. The UVs let light sampling read a
+// spatially varying emissive texture at the sampled point instead of assuming a flat factor. They are
+// packed into float4 slots so the layout does not depend on how either side aligns a float2.
 struct Light
 {
     float4 p0, p1, p2;
     uint4  info; // Material index, reserved, reserved, reserved
+    float4 uv01; // Emissive texture UV of p0 in .xy and of p1 in .zw
+    float4 uv2;  // Emissive texture UV of p2 in .xy
 };
-SNR_IO_STATIC_ASSERT(sizeof(Light) == 64);
+SNR_IO_STATIC_ASSERT(sizeof(Light) == 96);
 
 // Sentinel for "this instance emits no light".
 static const uint noLight = 0xffffffffu;
 
-// The material record the shader reads from its DDA, named for the glTF material it mirrors. Both
-// textures are already resolved: instead of an index into the glTF texture array they hold a texel
-// offset into Scene::texels plus that image's size, and the sampler state glTF keeps in samplers[]
-// is inlined next to its texture.
+// Upper bounds on the bindless texture and sampler arrays the shader declares. The host sizes its
+// descriptor pool from these and refuses a model that needs more, so both sides stay in step.
+static const int SNR_MAX_TEXTURES = 1024;
+static const int SNR_MAX_SAMPLERS = 32;
+
+// The material record the shader reads from its DDA, named for the glTF material it mirrors. Each
+// texture slot holds an index into the shader's images[] array (-1 when the slot is empty) and an
+// index into samplers[], so the wrap mode and filtering live in a real sampler instead of inlined
+// in the record.
 //
 // This is deliberately not what the BSDF sees. materialAt() turns one of these into a
 // SurfaceMaterial once the hit's UVs are known; see shaders/bsdf.slang.
 struct GltfMaterial
 {
     float4 pbrBaseColorFactor = float4(0.75f, 0.75f, 0.75f, 1.0f);      // pbrMetallicRoughness.baseColorFactor
-    float4 emissiveFactor = float4(0.0f);                               // emissiveFactor, already scaled
+    float4 emissiveFactor = float4(0.0f);                               // emissiveFactor, scaled by emissiveStrength
     float4 pbrMetallicRoughnessFactor = float4(0.0f, 1.0f, 0.0f, 0.0f); // Metallic, Roughness, reserved
     uint4  flags = uint4(1, 0, 0, 0);                                   // Double sided, PBR enabled, reserved
-    int4   pbrBaseColorTexture = int4(-1, 0, 0, 0);                     // Texel offset, width, height, reserved
-    uint4  pbrBaseColorSampler = uint4(10497, 10497, 0, 0);             // Wrap S, Wrap T, point filter, reserved
-    int4   pbrMetallicRoughnessTexture = int4(-1, 0, 0, 0);
-    uint4  pbrMetallicRoughnessSampler = uint4(10497, 10497, 0, 0);
+    int    pbrBaseColorTexture = -1;                                    // Index into images[]
+    int    pbrBaseColorSampler = 0;                                     // Index into samplers[]
+    int    pbrMetallicRoughnessTexture = -1;
+    int    pbrMetallicRoughnessSampler = 0;
+    int    normalTexture = -1;
+    int    normalSampler = 0;
+    int    occlusionTexture = -1;
+    int    occlusionSampler = 0;
+    int    emissiveTexture = -1;
+    int    emissiveSampler = 0;
+    float  normalScale = 1.0f;       // normalTexture.scale
+    float  occlusionStrength = 1.0f; // occlusionTexture.strength
 };
-SNR_IO_STATIC_ASSERT(sizeof(GltfMaterial) == 128);
+SNR_IO_STATIC_ASSERT(sizeof(GltfMaterial) == 112);
 
 // Per-dispatch constants for the path tracer.
 struct Params

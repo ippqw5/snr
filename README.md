@@ -76,15 +76,16 @@ cmake/        dependency wiring (Slang from the Vulkan SDK or a source build)
 | File | Role |
 | --- | --- |
 | `pathtracer.slang` | Entry points `traceMain` (path tracing) and `tonemapMain`; imports the modules below |
-| `scene.slang` | BVH traversal, hit resolution, texture sampling, material lookup, light PDFs |
+| `scene.slang` | BVH traversal, hit resolution, texture sampling, material lookup, normal mapping, light selection and PDFs |
 | `bsdf.slang` | Metallic-roughness BSDF evaluation and sampling |
 | `sampling.slang` | RNG, cosine-hemisphere sampling, power heuristic, ray offsetting |
 | `scene_io.h.slang` | Structs shared between host and device |
 
 `scene_io.h.slang` is the single source of truth for the host/device data layout. Both the C++ side
 and the Slang side include the same file, so the two definitions cannot drift; each struct's size is
-asserted in one place. `Triangle`, `Primitive`, `Instance`, `Light`, `GltfMaterial` and `Params` are
-all defined there.
+asserted in one place. `Primitive`, `Instance`, `Light`, `GltfMaterial` and `Params` are all defined
+there. Vertex attributes are not: positions, normals and UVs are bound as their own tight typed
+arrays, so an `float3`/`float2` element needs no `float4` padding to cross the boundary.
 
 ## Building
 
