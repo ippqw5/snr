@@ -4,8 +4,9 @@
 // of the scene's index and position arrays -- no vertex or index buffer is bound -- and projects them
 // with the precomputed view-projection rows. The fragment shader then evaluates the same glTF
 // material the path tracer does, because material_eval.h.slang is shared between the two, and shades
-// it without tracing a ray: emission, an ambient term from the constant environment, and an
-// unshadowed analytic contribution from the scene's light list.
+// it with emission, an ambient term from the constant environment, and a contribution from the
+// scene's light list that an inline ray query shadows: the fragment shader traces one occlusion ray
+// per light sample against the same acceleration structure the path tracer uses.
 //
 // Because RASTER_PIPELINE is defined, the shared texture fetch uses implicit-LOD Sample(), which a
 // fragment shader can do because it has screen-space derivatives; this is also what gives the preview
@@ -18,8 +19,10 @@ import bsdf;
 
 #include "scene_io.h.slang"
 
-// The scene, minus the acceleration structure and the per-triangle light list: this program never
-// traces a ray, so it does not declare either.
+// The scene arrays plus the acceleration structure the shadow rays test against. The raster program
+// traces only occlusion rays, so it declares the BVH but not the per-triangle light list the path
+// tracer's next-event estimation needs.
+uniform RaytracingAccelerationStructure sceneBVH;
 StructuredBuffer<float3> positions;
 StructuredBuffer<float3> normals;
 StructuredBuffer<float2> baseColorUvs;
@@ -85,9 +88,9 @@ RasterVertex rasterVS(uint vertexId : SV_VertexID, uint instanceIndex : SV_Start
     return output;
 }
 
-// Emission, then the environment arriving from every direction, then the scene's lights. Nothing here
-// is occluded and no ray is traced, which is the documented difference from the path tracer: the
-// preview has no shadows and only a constant environment instead of a real one.
+// Emission, then the environment arriving from every direction, then the scene's lights with a shadow
+// ray each. The environment stays unshadowed because a constant environment has no direction to trace
+// toward; only the analytic lights cast shadows.
 float3 shadeRaster(SurfaceInteraction surface, float3 view)
 {
     SurfaceMaterial material = surface.material;
@@ -102,9 +105,9 @@ float3 shadeRaster(SurfaceInteraction surface, float3 view)
         material.baseColor * (1 - material.metallic) * (1 - fresnel) + fresnel;
     radiance += rasterParams.environment.rgb * material.occlusion * ambient;
 
-    // Like the path tracer's next-event estimation, but sampled at each light's centroid and added
-    // without a visibility test. The strata are fixed rather than random so the preview is stable
-    // from frame to frame. lightPdf() returns the solid-angle pdf the same way NEE computes it.
+    // Like the path tracer's next-event estimation, but sampled at each light's centroid rather than
+    // at a random point. The strata are fixed rather than random so the preview is stable from frame
+    // to frame. lightPdf() returns the solid-angle pdf the same way NEE computes it.
     const uint kMaxLightSamples = 8;
     uint       lightCount = rasterParams.counts.x;
     uint       sampleCount = min(kMaxLightSamples, lightCount);
@@ -127,6 +130,20 @@ float3 shadeRaster(SurfaceInteraction surface, float3 view)
             float pdf = lightPdf(lightIndex, light, surface.position, centroid, lightCount);
             float cosine = dot(surface.normal, wi);
             if (pdf <= 0 || cosine <= 0)
+                continue;
+
+            // Shadow ray, biased off both surfaces the way the path tracer biases its NEE ray: one
+            // endpoint sits on the shaded surface, the other on the emitter, and both would otherwise
+            // re-intersect themselves at t = 0.
+            float3 lightNormal = normalize(cross(light.p1.xyz - light.p0.xyz, light.p2.xyz - light.p0.xyz));
+            if (dot(lightNormal, -wi) < 0)
+                lightNormal = -lightNormal;
+            float3 shadowOrigin = offsetRay(surface.position, surface.geometricNormal);
+            float3 shadowTarget = offsetRay(centroid, lightNormal);
+            float3 shadowDelta = shadowTarget - shadowOrigin;
+            float  shadowDistance = length(shadowDelta);
+            if (shadowDistance <= 0 ||
+                occluded(sceneBVH, shadowOrigin, shadowDelta / shadowDistance, shadowDistance - 1e-4))
                 continue;
 
             // The centroid is the barycentric (1/3, 1/3), the same point lightPdf() measured.

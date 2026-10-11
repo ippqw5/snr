@@ -307,6 +307,7 @@ void GpuScene::bind(const ShaderCursor& root) const
 
 void GpuScene::bindRaster(const ShaderCursor& root) const
 {
+    checkRhi(root["sceneBVH"].setBinding(m_tlas), "bind scene BVH");
     bindBuffers(root);
 }
 

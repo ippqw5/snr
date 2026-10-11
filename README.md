@@ -28,8 +28,9 @@ camera, film and image-output code: a path tracer and a forward raster preview.
 
 - Two rendering paths: the path tracer (default) and a single-pass forward rasterizer selected with
   `--raster`. The rasterizer shades each surface once in a fragment shader — emissive, an
-  environment-radiance ambient term and an unshadowed analytic light loop — so it gives an
-  immediate preview without the cost of tracing, at the price of no shadows or indirect light.
+  environment-radiance ambient term and an analytic light loop whose shadow rays are traced inline
+  against the scene's acceleration structure — so it gives an immediate preview without the cost of
+  tracing, at the price of no indirect light.
   With `--window` the raster preview runs interactively in a GLFW window (mouse orbit/pan/dolly).
   Both paths evaluate materials through one shared Slang module and leave the image pipeline through
   one shared tonemap, so they cannot drift apart.
@@ -152,7 +153,7 @@ The `snr` executable is the only front end.
 # A Khronos sample asset, lit with a studio rig
 snr --model DamagedHelmet --studio --width 1280 --height 720
 
-# The same scene through the forward raster preview (no shadows, immediate)
+# The same scene through the forward raster preview (direct lighting with shadows, immediate)
 snr --model DamagedHelmet --studio --raster --width 1280 --height 720
 
 # Interactive raster preview in a window: left drag orbits, right drag pans, wheel dollies

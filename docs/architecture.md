@@ -380,17 +380,25 @@ the two. The one difference is the texture fetch: `material_eval.h.slang` is com
 `RASTER_PIPELINE` defined, which selects implicit-LOD `Sample()` (a fragment shader has valid
 derivatives) instead of the ray tracer's explicit-gradient `SampleGrad`.
 
-Shading is deliberately shadow-free, since the raster program has no acceleration structure:
+Shading combines three terms:
 
 - emissive term from the material;
 - an environment-radiance ambient term scaled by occlusion (diffuse for dielectrics, tinted by base
   color for metals);
 - a short deterministic loop over the existing `lights`/`lightCdf`, point-sampled at each light's
-  centroid with the area-to-solid-angle pdf — the structural equivalent of the path tracer's NEE, but
-  without a shadow ray.
+  centroid with the area-to-solid-angle pdf — the structural equivalent of the path tracer's NEE —
+  where each sample traces an occlusion ray through `occluded()` in
+  [material_eval.h.slang](../shaders/material_eval.h.slang) and is skipped when the segment to the
+  emitter is blocked.
 
-So a preview is immediate but lacks shadows and indirect light; that is the documented difference
-from the path tracer.
+The occlusion test is an inline `RayQuery` in the fragment shader, traced against the same top-level
+acceleration structure the path tracer uses, which the raster root signature binds alongside the
+geometry buffers. Both endpoints are biased with `offsetRay` exactly as the NEE ray is, so neither the
+receiver nor the emitter self-intersects. The environment term stays unshadowed: a constant
+environment has no direction to trace toward.
+
+So a preview keeps the direct lighting and its shadows but lacks indirect light; that is the
+documented difference from the path tracer.
 
 ### 7.4 Into the film and out
 

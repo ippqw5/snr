@@ -4,8 +4,8 @@
 // The vertex arrays, primitives, instances, materials and lights it reads are globals the including
 // module owns, while the bindless image and sampler heaps travel as parameters. That split is what
 // lets one file serve both pipelines: sharing means sharing arithmetic, not sharing a binding set, so
-// neither program is ever compiled against the other's resources -- most importantly the rasterizer
-// never sees the acceleration structure.
+// neither program is compiled against the other's globals. The one resource both renderers need, the
+// acceleration structure, travels as a parameter of the occlusion helper below instead.
 //
 // The including module must have imported bsdf and included scene_io.h.slang and sampling.slang
 // before this file, and must declare the globals the functions below read.
@@ -184,6 +184,32 @@ float3 lightEmission(
     GltfMaterial material = materials[light.info.x];
     return material.emissiveFactor.rgb * sampleTexture(images, samplers, material.emissiveTexture,
         material.emissiveSampler, light.uv01.xy, light.uv01.zw, light.uv2.xy, bary, float2(0));
+}
+
+// True when any triangle blocks the segment from `origin` to `origin + direction * distance`. The
+// acceleration structure is a parameter, like the bindless heaps, so this header declares no binding
+// of its own and the raster preview is the only caller. The raster pipeline never invokes it for the
+// path tracer, which has its own traversal in scene.slang.
+//
+// The first candidate is committed and traversal stops, which is all an occlusion test needs. Note the
+// ray flags stay RAY_FLAG_NONE with an explicit commit: an inline query in a graphics pipeline that
+// relies on RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH to commit for it reports a miss on this backend.
+bool occluded(RaytracingAccelerationStructure bvh, float3 origin, float3 direction, float distance)
+{
+    if (distance <= 0)
+        return false;
+
+    RayDesc ray;
+    ray.Origin = origin;
+    ray.Direction = direction;
+    ray.TMin = 0;
+    ray.TMax = distance;
+
+    RayQuery<RAY_FLAG_NONE> query;
+    query.TraceRayInline(bvh, RAY_FLAG_NONE, 0xff, ray);
+    while (query.Proceed())
+        query.CommitNonOpaqueTriangleHit();
+    return query.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
 }
 
 // Mikkelsen's derivative-free tangent frame. A ray tracer has no ddx/ddy, so the frame comes from the
