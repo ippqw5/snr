@@ -84,7 +84,7 @@ int main(int argc, char** argv)
         std::optional<glm::vec3> eye, target;
         std::optional<float>     fov, environment;
 
-        CommandLine cli(argc, argv, "snr: headless Vulkan/Slang path tracer");
+        CommandLine cli(argc, argv, "snr: Vulkan/Slang path tracer and forward raster preview");
         cli.text("--model", "NAME_OR_PATH", "Khronos model name or ./gltf/.glb file", modelName);
         cli.text("--asset-dir", "PATH", "Models directory for name lookup", assetDir);
         cli.flag("--list-models", "List locally checked-out models", list);
@@ -118,6 +118,13 @@ int main(int argc, char** argv)
         cli.text("--output", "PATH.png", "Rendering output path", options.output.path);
         cli.text("--shader-dir", "PATH", "Shader source directory", options.shaderDir);
         cli.flag("--studio", "Add floor and area light to a glTF model", studio);
+        cli.flag("--raster", "Draw with the forward raster preview instead of the path tracer", [&] {
+            options.mode = RenderingMode::Raster;
+        });
+        cli.flag("--window", "Show the raster preview in an interactive window (implies --raster)", [&] {
+            options.windowed = true;
+            options.mode = RenderingMode::Raster;
+        });
         cli.flag("--no-nee", "Disable area-light next-event estimation", [&] { options.integrator.nee = false; });
         cli.flag("--validate", "Enable RHI and Vulkan validation", options.validation);
         cli.flag("--inspect", "Print scene Json without creating a GPU device", inspect);

@@ -1,59 +1,33 @@
 #include "./session.h"
 #include "gpu/device.h"
+#include "./dispatch.h"
 #include "shaders/scene_io.h.slang"
 #include "slang-rhi.h"
 #include "slang-rhi/shader-cursor.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <memory>
 #include <stdexcept>
 
 namespace snr
 {
-void bindParams(const rhi::ShaderCursor& cursor, const Params& params)
+void bindConstants(const rhi::ShaderCursor& cursor, const char* name, const void* data, size_t size)
 {
     rhi::ShaderCursor constants;
 
-    checkRhi(cursor["params"].getDereferenced(constants), "dereference paramter buffer");
-    if (!constants.isValid() || constants.getTypeLayout()->getSize() != sizeof(params))
+    checkRhi(cursor[name].getDereferenced(constants), "dereference paramter buffer");
+    if (!constants.isValid() || constants.getTypeLayout()->getSize() != size)
     {
         throw std::runtime_error("Host/Slang paramter layout dismatch");
     }
 
-    checkRhi(constants.setData(&params, sizeof(params)), "bind parameters");
+    checkRhi(constants.setData(data, size), "bind parameters");
 }
 
-template <typename BindResources>
-void dispatchImage(
-    DeviceContext&         context,
-    rhi::IComputePipeline* pipeline,
-    const Params&          params,
-    BindResources          bindResources
-)
+namespace
 {
-    auto encoder = context.createEncoder();
-    encoder->globalBarrier();
-    auto* pass = encoder->beginComputePass();
-    if (!pass)
-        throw std::runtime_error("begin compute pass failed");
-    auto* root = pass->bindPipeline(pipeline);
-    if (!root)
-        throw std::runtime_error("bind compute pipeline failed");
-    rhi::ShaderCursor cursor(root);
-    bindParams(cursor, params);
-    bindResources(cursor);
-    pass->dispatchCompute((params.image.x + 7) / 8, (params.image.y + 7) / 8, 1);
-    pass->end();
-    encoder->globalBarrier();
-    context.submitAndWait(encoder);
-}
-
-static Params makeParams(
-    const RenderSettings&  settings,
-    glm::vec3              environment,
-    uint32_t               lightCount,
-    const DisplaySettings& display = {}
-)
+Params makeParams(const RenderSettings& settings, glm::vec3 environment, uint32_t lightCount)
 {
     const auto& camera = settings.camera;
     Params      params = {};
@@ -73,30 +47,29 @@ static Params makeParams(
         glm::vec4(forward, float(settings.imageSize.width) / float(settings.imageSize.height));
     params.right = glm::vec4(right, 0);
     params.up = glm::vec4(up, 0);
-    params.environment = glm::vec4(environment, display.exposure);
+    params.environment = glm::vec4(environment, 0);
 
     return params;
 }
+} // namespace
 
-RenderSession::RenderSession(
-    ShaderLibrary&        shaders,
-    const Scene&          scene,
-    const RenderSettings& settings
-)
-    : m_context(shaders.context()), m_settings(settings), m_environment(scene.environment), m_film(m_context, settings.imageSize)
+Session::Session(ShaderLibrary& shaders, const Scene& scene, const RenderSettings& settings)
+    : m_context(shaders.context()), m_shaders(shaders), m_settings(settings), m_environment(scene.environment),
+      m_scene(std::make_unique<GpuScene>(m_context, scene)), m_film(m_context, settings.imageSize),
+      m_tonemap(shaders.computePipeline("tonemapMain"))
 {
-    m_scene = std::make_unique<GpuScene>(m_context, scene);
-    m_trace = shaders.computePipeline("traceMain");
-    m_tonemap = shaders.computePipeline("tonemapMain");
 }
 
-void RenderSession::resize(ImageSize size)
+void Session::resize(ImageSize size)
 {
-    m_film.resize(size);
+    if (size == m_settings.imageSize)
+        return;
+
     m_settings.imageSize = size;
+    m_film.resize(size);
 }
 
-void RenderSession::setCamera(const CameraSettings& camera)
+void Session::setCamera(const CameraSettings& camera)
 {
     if (camera == m_settings.camera)
         return;
@@ -104,63 +77,17 @@ void RenderSession::setCamera(const CameraSettings& camera)
     reset();
 }
 
-void RenderSession::setIntegrator(const IntegratorSettings& integrator)
-{
-    if (integrator == m_settings.integrator)
-        return;
-    m_settings.integrator = integrator;
-    reset();
-}
-
-void RenderSession::setEnvironment(glm::vec3 environment)
-{
-    if (environment == m_environment)
-        return;
-
-    m_environment = environment;
-    reset();
-}
-
-void RenderSession::setScene(const Scene& scene)
-{
-    auto replacement = std::make_unique<GpuScene>(m_context, scene);
-    m_scene = std::move(replacement);
-    m_environment = scene.environment;
-    reset();
-}
-
-void RenderSession::renderTo(uint32_t targetSamples, uint32_t batchSize)
-{
-    if (targetSamples < samples())
-    {
-        throw std::runtime_error("Reset the session before reducing the sample count");
-    }
-
-    Params params = makeParams(m_settings, m_environment, m_scene->lightCount());
-
-    while (samples() < targetSamples)
-    {
-        params.image.z = samples();
-        params.image.w = std::min(batchSize, targetSamples - samples());
-        dispatchImage(m_context, m_trace, params, [&](const rhi::ShaderCursor& cursor) {
-            m_scene->bind(cursor);
-            checkRhi(cursor["film"].setBinding(m_film.accumulation()), "bind film");
-        });
-        m_film.addSamples(params.image.w);
-        std::printf("\rSamples: %u/%u", samples(), targetSamples);
-        std::fflush(stdout);
-    }
-    m_context.checkValidation();
-}
-
-RenderResult RenderSession::readback(const DisplaySettings& display)
+RenderResult Session::readback(const DisplaySettings& display)
 {
     if (samples() == 0)
     {
         throw std::runtime_error("cannot read an empty film");
     }
 
-    Params params = makeParams(m_settings, m_environment, m_scene->lightCount(), display);
+    // tonemapMain only reads the image extent and the exposure, so the rest of the block stays zero.
+    Params params = {};
+    params.image = {m_settings.imageSize.width, m_settings.imageSize.height, 0, 0};
+    params.environment = glm::vec4(0, 0, 0, display.exposure);
 
     dispatchImage(m_context, m_tonemap, params, [&](const rhi::ShaderCursor& cursor) {
         checkRhi(cursor["film"].setBinding(m_film.accumulation()), "bind tonemap film");
@@ -170,5 +97,61 @@ RenderResult RenderSession::readback(const DisplaySettings& display)
     auto result = m_film.readback();
     m_context.checkValidation();
     return result;
+}
+
+PathSession::PathSession(ShaderLibrary& shaders, const Scene& scene, const RenderSettings& settings)
+    : Session(shaders, scene, settings)
+{
+    m_trace = shaders.computePipeline("traceMain");
+}
+
+void PathSession::setIntegrator(const IntegratorSettings& integrator)
+{
+    if (integrator == m_settings.integrator)
+        return;
+    m_settings.integrator = integrator;
+    reset();
+}
+
+void PathSession::setEnvironment(glm::vec3 environment)
+{
+    if (environment == m_environment)
+        return;
+
+    m_environment = environment;
+    reset();
+}
+
+void PathSession::setScene(const Scene& scene)
+{
+    auto replacement = std::make_unique<GpuScene>(m_context, scene);
+    m_scene = std::move(replacement);
+    m_environment = scene.environment;
+    reset();
+}
+
+void PathSession::render()
+{
+    const uint32_t target = m_settings.samplesPerPixel;
+    if (target < samples())
+    {
+        throw std::runtime_error("Reset the session before reducing the sample count");
+    }
+
+    Params params = makeParams(m_settings, m_environment, m_scene->lightCount());
+
+    while (samples() < target)
+    {
+        params.image.z = samples();
+        params.image.w = std::min(m_settings.batchSize, target - samples());
+        dispatchImage(m_context, m_trace, params, [&](const rhi::ShaderCursor& cursor) {
+            m_scene->bind(cursor);
+            checkRhi(cursor["film"].setBinding(m_film.accumulation()), "bind film");
+        });
+        m_film.addSamples(params.image.w);
+        std::printf("\rSamples: %u/%u", samples(), target);
+        std::fflush(stdout);
+    }
+    m_context.checkValidation();
 }
 } // namespace snr

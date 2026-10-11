@@ -9,6 +9,14 @@
 
 namespace snr
 {
+// One instance's draw record for the raster pass: the primitive it draws and that primitive's
+// triangle count, which together give the draw's vertex count (3 * triangleCount).
+struct InstanceDraw
+{
+    uint32_t primitive;
+    uint32_t triangleCount;
+};
+
 // An immutable GPU snapshot. CPU scene data is not retained after upload.
 class GpuScene
 {
@@ -17,16 +25,27 @@ public:
     GpuScene(const GpuScene&) = delete;
     GpuScene& operator=(const GpuScene&) = delete;
 
-    void     bind(const rhi::ShaderCursor& root) const;
+    // Binds the scene for the path tracer, including the acceleration structure.
+    void bind(const rhi::ShaderCursor& root) const;
+    // Binds the scene for the raster preview, which declares no acceleration structure and no
+    // per-triangle light list.
+    void bindRaster(const rhi::ShaderCursor& root) const;
     uint32_t lightCount() const
     {
         return m_lightCount;
     }
+    const std::vector<InstanceDraw>& draws() const
+    {
+        return m_draws;
+    }
 
 private:
+    void bindBuffers(const rhi::ShaderCursor& root) const;
     void buildAccelerationStructures(DeviceContext& context, const Scene& scene);
 
     uint32_t m_lightCount = 0;
+
+    std::vector<InstanceDraw> m_draws;
 
     // The acceleration structures read the position and index buffers, so they outlive the build.
     // The shader reads the same two buffers, so the geometry is uploaded exactly once.

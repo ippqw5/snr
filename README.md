@@ -1,10 +1,11 @@
 # snr — Slang Neural Renderer
 
-snr is a research-oriented, headless renderer written in C++20 and Slang. It currently loads glTF
-scenes and path-traces them on the GPU. The long-term goal is to fold neural rendering techniques
-into the renderer itself — denoising, super resolution, frame generation, neural textures, neural
-materials and neural radiance caching — implemented in pure Slang so that both training and
-inference stay on the GPU without a PyTorch dependency.
+snr is a research-oriented renderer written in C++20 and Slang. It currently loads glTF scenes and
+renders them on the GPU — headless by default, or in an interactive raster window with `--window`.
+The long-term goal is to fold neural rendering techniques into the renderer itself — denoising,
+super resolution, frame generation, neural textures, neural materials and neural radiance caching —
+implemented in pure Slang so that both training and inference stay on the GPU without a PyTorch
+dependency.
 
 The project is under active development. What follows describes what is implemented today, how the
 code is organized, and where it is heading.
@@ -15,14 +16,23 @@ code is organized, and where it is heading.
 | --- | --- |
 | glTF 2.0 loading | Working (`.gltf` and `.glb`) |
 | GPU path tracing | Working (hardware ray queries, progressive accumulation) |
+| GPU forward raster preview | Working (single pass, for quick previews) |
 | Neural post-pipeline | Planned |
 | Neural in-pipeline | Planned |
 
 ## Current capabilities
 
 Rendering runs on Vulkan through [slang-rhi](https://github.com/shader-slang/slang-rhi), using
-hardware ray queries rather than a software traversal.
+hardware ray queries rather than a software traversal. Two rendering paths share the same scene,
+camera, film and image-output code: a path tracer and a forward raster preview.
 
+- Two rendering paths: the path tracer (default) and a single-pass forward rasterizer selected with
+  `--raster`. The rasterizer shades each surface once in a fragment shader — emissive, an
+  environment-radiance ambient term and an unshadowed analytic light loop — so it gives an
+  immediate preview without the cost of tracing, at the price of no shadows or indirect light.
+  With `--window` the raster preview runs interactively in a GLFW window (mouse orbit/pan/dolly).
+  Both paths evaluate materials through one shared Slang module and leave the image pipeline through
+  one shared tonemap, so they cannot drift apart.
 - glTF 2.0 import via tinygltf: triangle meshes, PBR metallic-roughness materials, and the core
   material texture slots — base color, metallic-roughness, normal, occlusion and emissive — with
   per-slot UV sets and UV transforms, node hierarchy with instancing, and selection among multiple
@@ -55,37 +65,54 @@ src/
   scene/      Scene (CPU-side geometry/material/light data), GltfImporter
               (glTF -> Scene), GpuScene (buffer upload and acceleration structures),
               sceneJson (scene serialization for --inspect)
-  render/     RenderSession (synchronous progressive renderer), Film (accumulation
-              and display buffers), RenderSettings/RenderResult, render() one-shot entry
+  render/     Session (shared scene snapshot, film, settings, tone-map/readback) with
+              PathSession (synchronous progressive path tracer) and RasterSession
+              (single-pass forward raster preview), Film (accumulation and display
+              buffers), shared RenderSettings/RenderResult, render() one-shot entry
+  app/        Window (GLFW window + slang-rhi swapchain surface and input polling)
+              for the interactive preview
   io/         PNG and HDR image output
   util/       CommandLine (option registry that owns both parsing and usage) and a
               minimal JSON writer
-  pathtracer.cpp  pathtracer command-line front end (owns main)
+  main.cpp    snr command-line front end (owns main)
 shaders/      Slang sources compiled at runtime by ShaderLibrary
 cmake/        dependency wiring (Slang from the Vulkan SDK or a source build)
 ```
 
 ### Rendering flow
 
-1. `pathtracer.cpp` parses the command line, imports a glTF model into a `Scene`, and calls
+1. `main.cpp` parses the command line, imports a glTF model into a `Scene`, and calls
    `render()`.
-2. `render()` creates a `DeviceContext`, loads `pathtracer.slang` into a `ShaderLibrary`, and opens a
-   `RenderSession`.
+2. `render()` creates a `DeviceContext`, loads the shader module for the selected mode into a
+   `ShaderLibrary`, and opens a `PathSession` (path tracing) or a `RasterSession` (with `--raster`).
+   Both derive from `Session`, which owns the scene snapshot, the film and the tone-map/readback step.
+   With `--window`, `Window` opens a GLFW window and its slang-rhi surface, and the raster session
+   draws into the acquired swapchain image each frame instead of writing one image and exiting.
 3. The session uploads the scene through `GpuScene`, which builds one bottom-level acceleration
-   structure per primitive and a single top-level structure holding every instance.
-4. `renderTo()` dispatches the `traceMain` compute shader in batches, accumulating radiance into the
-   film. `readback()` runs `tonemapMain` and copies the accumulation and display buffers back to the
-   host, where `saveImages()` writes the results.
+   structure per primitive and a single top-level structure holding every instance. The raster path
+   reuses the same buffers and skips the acceleration structures.
+4. Path tracing: `render()` dispatches the `traceMain` compute shader in batches, accumulating
+   radiance into the film. Raster: `render()` records one draw per instance into an offscreen colour
+   and depth target, then copies the colour target into the film. Either way `readback()` runs
+   `tonemapMain` on the shared base and copies the accumulation and display buffers back to the host,
+   where `saveImages()` writes the results.
 
 ### Shaders
 
 | File | Role |
 | --- | --- |
-| `pathtracer.slang` | Entry points `traceMain` (path tracing) and `tonemapMain`; imports the modules below |
-| `scene.slang` | BVH traversal, hit resolution, texture sampling, material lookup, normal mapping, light selection and PDFs |
+| `pathtracer.slang` | Entry point `traceMain` (path tracing); imports the modules below |
+| `rasterizer.slang` | Entry points `rasterVS`/`rasterFS` (forward raster preview); same shared modules |
+| `scene.slang` | BVH traversal, hit resolution, material lookup and light sampling |
+| `material_eval.h.slang` | Texture fetch, corner interpolation, normal mapping and material evaluation, shared by both pipelines as plain functions over the bindless arrays |
+| `tonemap.h.slang` | Exposure, tone mapping and sRGB encode, shared by both pipelines |
 | `bsdf.slang` | Metallic-roughness BSDF evaluation and sampling |
 | `sampling.slang` | RNG, cosine-hemisphere sampling, power heuristic, ray offsetting |
 | `scene_io.h.slang` | Structs shared between host and device |
+
+`material_eval.h.slang` and `tonemap.h.slang` declare no bindings of their own; the including module
+declares the bindless image/sampler arrays and the `film`/`display` buffers and passes them in. That
+is what lets one header serve both the ray-traced and the rasterized pipeline.
 
 `scene_io.h.slang` is the single source of truth for the host/device data layout. Both the C++ side
 and the Slang side include the same file, so the two definitions cannot drift; each struct's size is
@@ -119,20 +146,26 @@ layout. If you build Slang yourself, point `-Dslang_DIR` at its `lib/cmake/slang
 
 ## Usage
 
-The `pathtracer` executable is the only front end.
+The `snr` executable is the only front end.
 
 ```sh
 # A Khronos sample asset, lit with a studio rig
-pathtracer --model DamagedHelmet --studio --width 1280 --height 720
+snr --model DamagedHelmet --studio --width 1280 --height 720
+
+# The same scene through the forward raster preview (no shadows, immediate)
+snr --model DamagedHelmet --studio --raster --width 1280 --height 720
+
+# Interactive raster preview in a window: left drag orbits, right drag pans, wheel dollies
+snr --model DamagedHelmet --studio --window --width 1280 --height 720
 
 # A model from an explicit path
-pathtracer --model ./my-scene.glb --spp 512 --output output/my-scene.png
+snr --model ./my-scene.glb --spp 512 --output output/my-scene.png
 
 # List the models available under the asset directory
-pathtracer --list-models
+snr --list-models
 
 # Dump the derived scene as JSON, without creating a GPU device
-pathtracer --model DamagedHelmet --inspect
+snr --model DamagedHelmet --inspect
 ```
 
 Common options:
@@ -148,6 +181,8 @@ Common options:
 | `--camera X Y Z --target X Y Z --fov DEG` | Camera override |
 | `--environment VALUE` | Constant linear environment radiance |
 | `--studio` | Add a floor and area light to a glTF model |
+| `--raster` | Preview with the forward rasterizer instead of path tracing |
+| `--window` | Show the raster preview in an interactive window (implies `--raster`) |
 | `--no-nee` | Disable next-event estimation |
 | `--shader-dir PATH` | Override the shader source directory |
 | `--validate` | Enable RHI and Vulkan validation |
@@ -192,6 +227,7 @@ extensible, and they share the same differentiable-Slang approach as the post-pi
 | [slang-rhi](https://github.com/shader-slang/slang-rhi) | GPU abstraction over Vulkan |
 | [tinygltf](https://github.com/syoyo/tinygltf) | glTF 2.0 parsing |
 | [glm](https://github.com/g-truc/glm) | Vector and matrix math |
+| [GLFW](https://github.com/glfw/glfw) | Interactive window (fetched by CMake at configure time) |
 | [stb](https://github.com/nothings/stb) | Image writing |
 | [glTF-Sample-Assets](https://github.com/KhronosGroup/glTF-Sample-Assets) | Test models |
 | Vulkan SDK | Device, ray queries, validation |

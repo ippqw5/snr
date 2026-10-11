@@ -108,6 +108,22 @@ set(GLM_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(GLM_BUILD_INSTALL OFF CACHE BOOL "" FORCE)
 add_subdirectory(external/glm EXCLUDE_FROM_ALL)
 
+# The interactive window backend. GLFW is cross-platform and, together with slang-rhi's
+# getWindowHandleFromGLFW, hands the device a native window handle on Windows, X11 and Cocoa, so the
+# windowed preview is not tied to one platform.
+include(FetchContent)
+set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    glfw
+    GIT_REPOSITORY https://github.com/glfw/glfw.git
+    GIT_TAG 3.4
+    GIT_SHALLOW ON
+)
+FetchContent_MakeAvailable(glfw)
+
 set(SLANG_RHI_BUILD_FROM_SLANG_REPO ON)
 set(SLANG_RHI_FETCH_SLANG OFF CACHE BOOL "" FORCE)
 set(SLANG_RHI_SLANG_INCLUDE_DIR "${snr_slang_include_dir}" CACHE STRING "" FORCE)

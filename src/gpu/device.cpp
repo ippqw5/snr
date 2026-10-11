@@ -120,11 +120,16 @@ ComPtr<ICommandEncoder> DeviceContext::createEncoder() const
     return encoder;
 }
 
-void DeviceContext::submitAndWait(rhi::ICommandEncoder* encoder) const
+void DeviceContext::submit(rhi::ICommandEncoder* encoder) const
 {
     ComPtr<ICommandBuffer> commands;
     checkRhi(encoder->finish(commands.writeRef()), "finish commands");
     checkRhi(m_queue->submit(commands), "submit commands");
+}
+
+void DeviceContext::submitAndWait(rhi::ICommandEncoder* encoder) const
+{
+    submit(encoder);
     checkRhi(m_queue->waitOnHost(), "wait gfx idle");
 }
 

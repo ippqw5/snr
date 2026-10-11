@@ -43,13 +43,20 @@ public:
     {
         return m_device;
     }
+    rhi::ICommandQueue* queue() const
+    {
+        return m_queue;
+    }
     const std::filesystem::path& shaderDir() const
     {
         return m_shaderDir;
     }
     rhi::ComPtr<rhi::ICommandEncoder> createEncoder() const;
-    void                              submitAndWait(rhi::ICommandEncoder* encoder) const;
-    void                              checkValidation() const;
+    // Submits without waiting, for callers that present right after and let the queue's own
+    // synchronization order the frame.
+    void submit(rhi::ICommandEncoder* encoder) const;
+    void submitAndWait(rhi::ICommandEncoder* encoder) const;
+    void checkValidation() const;
 
 private:
     class DebugCallback : public rhi::IDebugCallback

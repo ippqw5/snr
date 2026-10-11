@@ -73,6 +73,12 @@ GpuScene::GpuScene(DeviceContext& context, const Scene& scene)
     m_triangleLights = upload(device, scene.triangleLights);
     m_lightCdf = upload(device, scene.lightCdf);
 
+    // The raster preview draws one instance per draw call, so each instance records the primitive it
+    // references and that primitive's triangle count for the draw's vertex count.
+    m_draws.reserve(scene.instances.size());
+    for (const Instance& instance : scene.instances)
+        m_draws.push_back({instance.primitive, scene.primitives[instance.primitive].triangleCount});
+
     // Each image becomes one hardware texture with its full mip chain, and each distinct sampler
     // state one sampler object. The material records name them by index, so the shader's bindless
     // arrays are filled in the same order the importer registered them.
@@ -295,6 +301,17 @@ void GpuScene::buildAccelerationStructures(DeviceContext& context, const Scene& 
 void GpuScene::bind(const ShaderCursor& root) const
 {
     checkRhi(root["sceneBVH"].setBinding(m_tlas), "bind scene BVH");
+    checkRhi(root["triangleLights"].setBinding(m_triangleLights), "bind triangle lights");
+    bindBuffers(root);
+}
+
+void GpuScene::bindRaster(const ShaderCursor& root) const
+{
+    bindBuffers(root);
+}
+
+void GpuScene::bindBuffers(const ShaderCursor& root) const
+{
     checkRhi(root["positions"].setBinding(m_positions), "bind positions");
     checkRhi(root["normals"].setBinding(m_normals), "bind normals");
     checkRhi(root["baseColorUvs"].setBinding(m_baseColorUvs), "bind base color uvs");
@@ -307,7 +324,6 @@ void GpuScene::bind(const ShaderCursor& root) const
     checkRhi(root["instances"].setBinding(m_instances), "bind instances");
     checkRhi(root["materials"].setBinding(m_materials), "bind materials");
     checkRhi(root["lights"].setBinding(m_lights), "bind lights");
-    checkRhi(root["triangleLights"].setBinding(m_triangleLights), "bind triangle lights");
     checkRhi(root["lightCdf"].setBinding(m_lightCdf), "bind light cdf");
 
     // The bindless heaps are plain arrays of handles, so each texture and sampler is written into the

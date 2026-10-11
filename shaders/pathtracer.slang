@@ -2,12 +2,17 @@ import sampling;
 import scene;
 import bsdf;
 
+// `film` and `display` are the Film buffers; tonemap.h.slang reads them along with `params`.
 RWStructuredBuffer<float4> film;
 RWStructuredBuffer<float4> display;
 
+// Exposure, tone mapping and sRGB encoding. Shared with the raster preview so both renderers leave
+// the image pipeline at the same place.
+#include "tonemap.h.slang"
+
 // The ray cone tracks the world-space area one sample covers as the path travels. It starts at zero
 // width with the angular size of a pixel, and every hit re-seeds the width with the footprint
-// measured on the surface. Texture mip selection reads it; see textureGradient() in scene.slang.
+// measured on the surface. Texture mip selection reads it; see textureGradient() in material_eval.h.slang.
 struct RayCone
 {
     float width;
@@ -40,17 +45,20 @@ float3 tracePath(float3 origin, float3 direction, float pixelAngle, inout uint r
         // surfaces, which is what keeps those lookups from aliasing.
         float3 hitNormal = geometricNormal(instance, triangle);
         float footprint = (cone.width + cone.spread * hit.t) / max(abs(dot(hitNormal, direction)), 1e-3);
-        SurfaceInteraction surface = surfaceAt(instance, triangle, material, hit.bary, wo, footprint);
+        SurfaceInteraction surface =
+            surfaceAt(images, samplers, instance, triangle, material, hit.bary, wo, footprint);
         float3 position = surface.position;
         float3 ng = surface.geometricNormal;
         float3 normal = surface.normal;
 
+        uint lightCount = params.integrator.z;
         int hitLight = lightIndexOf(instance, hit.primitive);
         float emissionWeight = 1;
         if (previousUseNee && hitLight >= 0)
         {
             emissionWeight = powerHeuristic(
-                previousPdf, lightPdf(uint(hitLight), lights[uint(hitLight)], previousPosition, position)
+                previousPdf,
+                lightPdf(uint(hitLight), lights[uint(hitLight)], previousPosition, position, lightCount)
             );
         }
 
@@ -61,14 +69,14 @@ float3 tracePath(float3 origin, float3 direction, float pixelAngle, inout uint r
         bool useNee = params.integrator.w != 0 && params.integrator.z != 0;
         if (useNee)
         {
-            uint sampledLight = sampleLightIndex(randomFloat(rng) * lightCdf[params.integrator.z]);
+            uint sampledLight = lightIndexFromCdf(randomFloat(rng) * lightCdf[lightCount], lightCount);
             Light light = lights[sampledLight];
             float r = sqrt(randomFloat(rng));
             float v = randomFloat(rng);
             float3 lightPoint = light.p0.xyz * (1 - r) + light.p1.xyz * r * (1 - v) + light.p2.xyz * r * v;
             float3 wi = normalize(lightPoint - position);
             float cosine = max(0.0, dot(normal, wi));
-            float pdf = lightPdf(sampledLight, light, position, lightPoint);
+            float pdf = lightPdf(sampledLight, light, position, lightPoint, lightCount);
             if (pdf > 0 && cosine > 0 && dot(ng, wi) > 0)
             {
                 float3 lightNormal = normalize(cross(light.p1.xyz - light.p0.xyz, light.p2.xyz - light.p0.xyz));
@@ -86,7 +94,7 @@ float3 tracePath(float3 origin, float3 direction, float pixelAngle, inout uint r
                     float weight = powerHeuristic(pdf, bsdf.pdf);
                     // The light's emission is read at the sampled point so a textured emitter is
                     // estimated correctly; the barycentrics are (r * (1 - v), r * v).
-                    float3 emission = lightEmission(light, float2(r * (1 - v), r * v));
+                    float3 emission = lightEmission(images, samplers, light, float2(r * (1 - v), r * v));
                     radiance += throughput * bsdf.value * emission * cosine * weight / pdf;
                 }
             }
@@ -139,23 +147,4 @@ void traceMain(uint3 tid : SV_DispatchThreadID)
         sum += float4(tracePath(params.eye.xyz, direction, pixelAngle, rng), 1);
     }
     film[pixel] = sum;
-}
-
-float3 linearToSrgb(float3 color)
-{
-    return select(color <= 0.0031308, color * 12.92, pow(color, 1 / 2.4) * 1.055 - 0.055);
-}
-
-[shader("compute")]
-[numthreads(8, 8, 1)]
-void tonemapMain(uint3 tid : SV_DispatchThreadID)
-{
-    if (tid.x >= params.image.x || tid.y >= params.image.y)
-        return;
-
-    uint pixel = tid.y * params.image.x + tid.x;
-    float4 sum = film[pixel];
-    float3 color = max(sum.rgb / sum.w * exp2(params.environment.w), 0);
-    color = color / (color + 1);
-    display[pixel] = float4(linearToSrgb(color), 1);
 }

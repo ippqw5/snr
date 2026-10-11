@@ -22,11 +22,13 @@ void Film::resize(ImageSize size)
         return;
 
     size_t bytes = size_t(size.width) * size_t(size.height) * sizeof(glm::vec4);
+    // CopyDestination is what lets the raster preview write its colour target into the film with a
+    // texture-to-buffer copy; the path tracer simply never uses that usage.
     auto   accumulation = makeBuffer(
         m_context.device(),
         bytes,
         sizeof(glm::vec4),
-        BufferUsage::UnorderedAccess | BufferUsage::CopySource,
+        BufferUsage::UnorderedAccess | BufferUsage::CopySource | BufferUsage::CopyDestination,
         ResourceState::UnorderedAccess
     );
     auto display = makeBuffer(

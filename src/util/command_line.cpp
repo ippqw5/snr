@@ -15,7 +15,7 @@ CommandLine::CommandLine(int argc, char** argv, std::string title)
     : m_argc(argc)
     , m_argv(argv)
     , m_title(std::move(title))
-    , m_program(argc > 0 ? std::filesystem::path(argv[0]).stem().string() : std::string("pathtracer"))
+    , m_program(argc > 0 ? std::filesystem::path(argv[0]).stem().string() : std::string("snr"))
 {
     // Registered here rather than by the caller so help can never be forgotten, and marked
     // trailing so the usage text lists it last.

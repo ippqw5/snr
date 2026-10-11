@@ -32,11 +32,24 @@ struct RenderSettings
     ImageSize          imageSize;
     CameraSettings     camera;
     IntegratorSettings integrator;
+    // Path tracer accumulation: the target samples per pixel and the batch a dispatch adds. These are
+    // not per-draw constants, so they stay on the host side of the session. The raster preview draws
+    // one frame and ignores them.
+    uint32_t samplesPerPixel = 256;
+    uint32_t batchSize = 16;
 };
 
 struct DisplaySettings
 {
     float exposure = 0;
+};
+
+// Which renderer draws the frame. The two are peers over the same scene snapshot, film and image
+// output, so selecting one is a runtime choice rather than a build-time one.
+enum class RenderingMode
+{
+    PathTracing,
+    Raster,
 };
 
 struct OutputSettings

@@ -132,6 +132,30 @@ struct Params
 };
 SNR_IO_STATIC_ASSERT(sizeof(Params) == 112);
 
+// Per-frame constants for the raster preview. The view-projection is stored as its four rows rather
+// than as a matrix, so the host and the shader cannot disagree on the storage order: clip is
+// (dot(rowX.xyz, p) + rowX.w, dot(rowY.xyz, p) + rowY.w, ...) with p in world space. Each draw
+// carries its own instance index (DrawArguments::startInstanceLocation) instead of a constant, so
+// nothing in here is per-draw.
+struct RasterParams
+{
+    float4 viewProjRows[4]; // Rows of the world-to-clip matrix
+    float4 eye;             // Eye position, w holds tan(fov / 2)
+    float4 environment;     // Constant environment radiance, w reserved
+    uint4  counts;          // Number of lights in the light list, rest reserved
+};
+SNR_IO_STATIC_ASSERT(sizeof(RasterParams) == 112);
+
+// Per-frame constants for the windowed present pass, which tone maps the film straight into a
+// swapchain image. `config.y` is 1 when that image's format is sRGB, so the shader writes linear
+// values and leaves the encode to the hardware instead of double-encoding.
+struct PresentParams
+{
+    uint4  image;  // Width and height of the target, rest reserved
+    float4 config; // Exposure in stops, sRGB flag, rest reserved
+};
+SNR_IO_STATIC_ASSERT(sizeof(PresentParams) == 32);
+
 SNR_IO_END()
 
 #endif // SNR_SCENE_IO_H

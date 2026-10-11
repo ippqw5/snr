@@ -10,8 +10,9 @@ implementation; it is not a roadmap.
 - [4. Host/device contract](#4-hostdevice-contract)
 - [5. GPU upload and binding](#5-gpu-upload-and-binding)
 - [6. Rendering algorithm](#6-rendering-algorithm)
-- [7. Shader modules](#7-shader-modules)
-- [8. End-to-end data flow](#8-end-to-end-data-flow)
+- [7. Forward raster preview](#7-forward-raster-preview)
+- [8. Shader modules](#8-shader-modules)
+- [9. End-to-end data flow](#9-end-to-end-data-flow)
 
 ## 1. Overview
 
@@ -22,8 +23,11 @@ snr is a headless renderer built from three layers that do not overlap:
   isolation.
 - A **GPU layer** that uploads that structure once as an immutable snapshot and binds it to the
   shaders.
-- A **render layer** that dispatches the Slang path tracer in batches, accumulates into a film
-  buffer, and reads the result back for display and file output.
+- A **render layer** that runs one of two renderers — a path tracer or a forward raster preview —
+  accumulates into a film buffer, and reads the result back for display and file output.
+
+The two renderers share the scene, camera, film, tonemap and output code; only the shading step
+differs. The path tracer is described in §6, the raster preview in §7.
 
 The layers communicate through exactly one shared definition file,
 [scene_io.h.slang](../shaders/scene_io.h.slang), which both C++ and Slang include. That file is the
@@ -33,8 +37,8 @@ single source of truth for every struct that crosses the host/device boundary.
 
 ```
 src/
-  pathtracer.cpp   Command-line front end (owns main). Parses options, loads the model,
-                   calls render().
+  main.cpp         Command-line front end for the snr executable (owns main). Parses
+                   options, loads the model, calls render().
   gpu/             DeviceContext (Vulkan device, queue, validation, shader search path) and
                    ShaderLibrary (Slang module load + compute pipeline cache), plus the
                    makeBuffer/upload helpers and checkRhi.
@@ -43,7 +47,11 @@ src/
                    GpuScene      Scene -> GPU buffers, textures and acceleration structures
                    scene_json    Scene -> JSON for --inspect
   render/          RenderSettings, RenderResult, Film (accumulation + display buffers),
-                   RenderSession (progressive renderer), render() one-shot entry.
+                   Session (shared scene snapshot, film, settings, tone-map/readback) with the
+                   subclasses PathSession (progressive path tracer) and RasterSession (forward
+                   raster preview), dispatch helpers shared by both, render() one-shot entry.
+  app/             Window (GLFW window + slang-rhi swapchain surface, resize handling and
+                   input polling) for the interactive preview.
   io/              PNG and HDR image output (stb_image_write).
   util/            CommandLine (declarative option registry that owns both parsing and usage)
                    and a minimal JSON writer.
@@ -140,6 +148,7 @@ type operand, so the assertions are host-only; the shared definition is what kee
 | `Light` | 96 B | World-space `p0/p1/p2`, an info vector whose `.x` is the material index, and the emitter's UVs |
 | `GltfMaterial` | 112 B | PBR factors, flags, texture/sampler indices for all five slots, and the normal/occlusion scales |
 | `Params` | 112 B | Per-dispatch constants (image, integrator, camera basis, environment) |
+| `RasterParams` | 112 B | Raster constants: view-projection rows, eye + `tan(fov/2)`, environment, light count |
 
 Not shared are the vertex attributes. Positions, normals, UVs and indices are each bound as their
 own typed array (`StructuredBuffer<float3>`, `<float2>`, `<uint3>`), which is what lets the elements
@@ -199,20 +208,37 @@ used as the shader's hit lookup, the instance mask, and the corresponding BLAS h
 - **Textures and samplers** are written into their **bindless slots** by `setDescriptorHandle`, one
   per registered image/sampler.
 
+`GpuScene::bindRaster()` binds the same buffers **except** `sceneBVH` and `triangleLights`, which the
+raster program never declares: it has no acceleration structure and no light-index remap, so binding
+them would only link a pipeline it does not use. `GpuScene` also exposes one `InstanceDraw`
+(`primitive`, `triangleCount`) per instance for the draw loop in §7.
+
 ## 6. Rendering algorithm
 
 ### 6.1 Frame execution
 
-`render()` ([renderer.cpp](../src/render/renderer.cpp)) creates the device, loads
-`pathtracer.slang`, opens a `RenderSession`, and then:
+`render()` ([renderer.cpp](../src/render/renderer.cpp)) creates the device, loads the shader module
+for the selected mode (`RenderingMode::PathTracing` or `RenderingMode::Raster`, set by `--raster`),
+opens a `PathSession` or a `RasterSession`, and then runs the same three steps for either:
 
-1. `RenderSession::renderTo(spp, batchSize)` — the progressive accumulation loop.
-2. `RenderSession::readback(display)` — tone mapping + buffer copy to host.
+1. Render — `render()`. The path tracer accumulates its sample batches; the raster preview records
+   its one pass.
+2. Readback — `readback(display)` — tone mapping + buffer copy to host.
 3. `saveImages()` — writes the tone-mapped PNG and the linear HDR image.
 
-`renderTo` dispatches `traceMain` in batches. Each batch packs `Params` with
-`image.z = samples accumulated so far` and `image.w = batch size`; the shader adds its new samples to
-the film buffer in place, so a session accumulates toward a target and can be extended without
+Both sessions derive from `Session` ([session.h](../src/render/session.h)), which owns the scene
+snapshot, the settings, the film and the tone-map/readback step, and declares the pure virtual
+`render()`. So the two renderers share everything except the pipelines and the draw itself — including
+the sample-count bookkeeping, `resize`/`setCamera`, and the `samples()`/`reset()` surface a future
+interactive loop needs. `PathSession` adds the integrator/environment/scene setters and the
+accumulation loop; `RasterSession` adds the offscreen targets and the draw loop of §7. Output,
+exposure and the image pipeline are therefore literally the same code for both; §7 covers the one
+place they diverge.
+
+`PathSession::render()` dispatches `traceMain` in batches until the film reaches
+`RenderSettings::samplesPerPixel`, in steps of `RenderSettings::batchSize`. Each batch packs `Params`
+with `image.z = samples accumulated so far` and `image.w = batch size`; the shader adds its new samples
+to the film buffer in place, so a session accumulates toward a target and can be extended without
 re-rendering earlier samples.
 
 `Params` packing ([session.cpp](../src/render/session.cpp)):
@@ -312,20 +338,116 @@ the host; `saveImages()` writes the display buffer as PNG and a full-precision l
 `hash32` builds the per-sample RNG state from pixel, sample index and seed; `randomFloat` is a
 small counter-based PRNG. `offsetRay` nudges ray origins off the surface to avoid self-intersection.
 
-## 7. Shader modules
+## 7. Forward raster preview
+
+`RasterSession` ([rasterizer.cpp](../src/render/rasterizer.cpp)) is the other `Session` subclass: the
+scene snapshot, film, settings, tone-map and readback all come from the base, so it only adds the
+graphics pipeline, the offscreen targets and the draw loop. It is selected by `--raster`. It exists so
+an interactive preview does not pay for a full path trace. It is **forward and single-pass** — shading
+happens in the fragment shader, with no G-buffer and no second pass.
+
+### 7.1 Pass and draw loop
+
+`render()` records one render pass with an RGBA32Float colour target (cleared to the scene's
+environment radiance, so pixels the geometry misses match the path tracer's miss radiance) and a
+D32Float depth target. The pipeline is built by `ShaderLibrary::renderPipeline("rasterVS", "rasterFS",
+desc)`; the depth test is **reversed-Z** (`clip.z` is the constant near plane and `clip.w` the view
+depth, so stored depth is `near / viewZ`) with `ComparisonFunc::Greater`, which keeps float precision
+uniform and needs no far plane. Culling is off, matching the path tracer's lack of culling.
+
+One draw is issued per instance — `DrawArguments{vertexCount = triangleCount * 3, instanceCount = 1,
+startInstanceLocation = instanceIndex}` — with no vertex or index buffer bound. The instance index
+reaches the vertex shader through `SV_StartInstanceLocation` (`SV_InstanceID` reports
+`instanceID - baseInstance` under D3D semantics and carries nothing usable here).
+
+### 7.2 Vertex pulling
+
+`rasterVS` reads `SV_VertexID` and derives `triangle = vertexId / 3`, `corner = vertexId % 3`, then
+addresses `indices[primitive.firstTriangle + triangle] + primitive.vertexBase`. Because each
+primitive owns a contiguous vertex window, this resolves a corner with no index buffer, no
+vertex-buffer usage change, and no second copy of position data — the §4 hard constraint holds.
+The vertex is transformed by `RasterParams.viewProjRows` and handed on as `SV_Position`, with the
+world position and the instance index passed through as varyings. The projection rows reproduce the
+path tracer's ray basis, so the two renderers frame a model identically.
+
+### 7.3 Fragment shading
+
+`rasterFS` uses `SV_PrimitiveID` and `SV_Barycentrics` to pull the triangle's normal/UV corners and
+interpolate them, then calls the **shared** `surfaceAt` from
+[material_eval.h.slang](../shaders/material_eval.h.slang) — the same material evaluation the path
+tracer uses, so base color, metallic-roughness, normal mapping and occlusion cannot diverge between
+the two. The one difference is the texture fetch: `material_eval.h.slang` is compiled with
+`RASTER_PIPELINE` defined, which selects implicit-LOD `Sample()` (a fragment shader has valid
+derivatives) instead of the ray tracer's explicit-gradient `SampleGrad`.
+
+Shading is deliberately shadow-free, since the raster program has no acceleration structure:
+
+- emissive term from the material;
+- an environment-radiance ambient term scaled by occlusion (diffuse for dielectrics, tinted by base
+  color for metals);
+- a short deterministic loop over the existing `lights`/`lightCdf`, point-sampled at each light's
+  centroid with the area-to-solid-angle pdf — the structural equivalent of the path tracer's NEE, but
+  without a shadow ray.
+
+So a preview is immediate but lacks shadows and indirect light; that is the documented difference
+from the path tracer.
+
+### 7.4 Into the film and out
+
+The pass leaves linear radiance in the colour target. `copyTextureToBuffer` copies it into
+`Film::accumulation()` as a single sample, after which the existing `tonemapMain` +
+`Film::readback()` + `saveImages()` path runs unchanged. `tonemap.h.slang` is included by both
+`pathtracer.slang` and `rasterizer.slang`, so exposure and the display transform are literally the
+same code in both renderers. (This is why `Film`'s accumulation buffer carries
+`BufferUsage::CopyDestination` and the colour target `TextureUsage::CopySource`.)
+
+### 7.5 Windowed presentation
+
+With `--window` the headless loop is replaced by an interactive one, and the colour target becomes
+"offscreen or swapchain" rather than a fixed texture. `Window` ([window.cpp](../src/app/window.cpp))
+uses GLFW only for the window and input: the swapchain itself is slang-rhi's, created from
+`getWindowHandleFromGLFW` so the same code path serves Win32, X11 and Cocoa. `pump()` polls events,
+reconfigures the surface on a framebuffer resize and reports the new extent, which `renderWindowed`
+mirrors onto the session with `Session::resize`.
+
+Each frame is `render()` (the §7.1 pass into the film, unchanged) followed by `present()`. The latter
+runs `presentVS`/`presentFS` — a fullscreen triangle that reads the film at the pixel named by
+`SV_Position` — into the acquired swapchain image, and it creates that pipeline lazily from the
+target's format, so the surface, not the session, decides the swapchain format. Both the film write
+and the present pass call the same `tonemapCore`, so the on-screen image matches the offscreen one.
+If the swapchain format is sRGB the shader writes linear values and lets the hardware encode;
+otherwise it encodes with `linearToSrgb` itself. Submitting does not wait, as the queue's own
+synchronization orders the frame ahead of the present.
+
+Mouse input is polled by the window and turned into a camera by `applyCameraInput` in
+[renderer.cpp](../src/render/renderer.cpp): left drag orbits, right drag pans, the wheel dollies, and
+each change goes through `Session::setCamera`, which resets the film and redraws. Headless stays the
+default, so `--inspect`, the byte-comparable path-trace regression and `--raster` are untouched.
+
+## 8. Shader modules
 
 | File | Role |
 | --- | --- |
-| [pathtracer.slang](../shaders/pathtracer.slang) | Entry points `traceMain` and `tonemapMain`; the path loop and the ray cone |
-| [scene.slang](../shaders/scene.slang) | BVH traversal, hit resolution, attribute gathering, texture sampling, material lookup, normal mapping, light selection and PDF |
+| [pathtracer.slang](../shaders/pathtracer.slang) | Entry point `traceMain`; the path loop and the ray cone |
+| [rasterizer.slang](../shaders/rasterizer.slang) | Entry points `rasterVS`/`rasterFS` plus `presentVS`/`presentFS` for the window; defines `RASTER_PIPELINE` and declares the scene bindings minus the BVH and light remap |
+| [scene.slang](../shaders/scene.slang) | BVH traversal, hit resolution, material lookup, light selection and PDF |
+| [material_eval.h.slang](../shaders/material_eval.h.slang) | Texture fetch, corner interpolation, normal mapping and `surfaceAt` material evaluation, as plain functions over the bindless arrays; shared by both pipelines |
+| [tonemap.h.slang](../shaders/tonemap.h.slang) | `tonemapCore` exposure + Reinhard and the sRGB encode, plus `tonemapMain`; shared by both pipelines |
 | [bsdf.slang](../shaders/bsdf.slang) | Metallic-roughness BSDF evaluation and sampling |
 | [sampling.slang](../shaders/sampling.slang) | RNG, cosine-hemisphere sampling, power heuristic, ray offsetting |
 | [scene_io.h.slang](../shaders/scene_io.h.slang) | Structs shared between host and device |
 
-`ShaderLibrary` loads `pathtracer.slang` once; each `computePipeline(entryPoint)` composes the module
-with an entry point, links it, and caches the resulting compute pipeline.
+`material_eval.h.slang` and `tonemap.h.slang` declare **no bindings of their own**. The including
+module declares the bindless image/sampler arrays and the `film`/`display` buffers and passes them in
+as function parameters (`Texture2D<float4>.Handle images[]`, `SamplerState.Handle samplers[]`). That
+is what lets one header serve both pipelines without either one linking the other's globals — in
+particular the raster program never links `sceneBVH`.
 
-## 8. End-to-end data flow
+`ShaderLibrary` loads a module once; `computePipeline(entryPoint)` and `renderPipeline(vertex,
+fragment, desc)` compose it with the requested entry points, link, diagnose, and cache the resulting
+pipeline.
+
+## 9. End-to-end data flow
 
 ```
  glTF file
@@ -344,10 +466,13 @@ with an entry point, links it, and caches the resulting compute pipeline.
                                           ├─► bindless images[] / samplers[] (handle slots)
    samplers ───► ISampler ────────────────┘
                   │
-                  ▼  RenderSession::renderTo (batched)
-              traceMain ──► film (float4 per pixel, accumulative)
+                  ├─► PathSession::render (batched)                [--raster off]
+                  │      traceMain ──► film (float4 per pixel, accumulative)
                   │
-                  ▼  RenderSession::readback
+                  └─► RasterSession::render                         [--raster]
+                         rasterVS/rasterFS ──► colour + depth ──► copy ──► film
+                  │
+                  ▼  Session::readback (either subclass)
               tonemapMain ──► display
                   │
                   ▼  Film::readback + saveImages
