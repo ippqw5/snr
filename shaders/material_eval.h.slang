@@ -99,7 +99,9 @@ float2 textureGradient(float footprint, float3 edge1, float3 edge2, float2 uv0, 
     return float2(g, g);
 }
 
-float3 sampleTexture(
+// Fetches one texture, or a constant 1 when the slot is empty. The full texel is returned because the
+// base color's alpha drives the raster preview's alpha test and blending; the other slots read .rgb.
+float4 sampleTexture(
     Texture2D<float4>.Handle images[],
     SamplerState.Handle samplers[],
     int textureIndex,
@@ -111,15 +113,15 @@ float3 sampleTexture(
     float2 gradient)
 {
     if (textureIndex < 0)
-        return 1;
+        return float4(1);
     float2 uv = uv0 * (1 - bary.x - bary.y) + uv1 * bary.x + uv2 * bary.y;
     Texture2D<float4> image = images[uint(textureIndex)];
     SamplerState sampler = samplers[uint(samplerIndex)];
 #ifdef RASTER_PIPELINE
     // A fragment shader runs per pixel quad, so the hardware can pick the mip from the derivatives.
-    return image.Sample(sampler, uv).rgb;
+    return image.Sample(sampler, uv);
 #else
-    return image.SampleGrad(sampler, uv, gradient, gradient).rgb;
+    return image.SampleGrad(sampler, uv, gradient, gradient);
 #endif
 }
 
@@ -141,15 +143,17 @@ SurfaceMaterial materialAt(
     SurfaceMaterial result = {};
     float2 baseColorGradient = textureGradient(footprint, edge1, edge2,
         triangle.baseColorUv0, triangle.baseColorUv1, triangle.baseColorUv2);
-    result.baseColor = material.pbrBaseColorFactor.rgb * sampleTexture(images, samplers,
+    float4 baseColorSample = sampleTexture(images, samplers,
         material.pbrBaseColorTexture, material.pbrBaseColorSampler, triangle.baseColorUv0,
         triangle.baseColorUv1, triangle.baseColorUv2, bary, baseColorGradient);
+    result.baseColor = material.pbrBaseColorFactor.rgb * baseColorSample.rgb;
+    result.alpha = material.pbrBaseColorFactor.a * baseColorSample.a;
 
     float2 metallicRoughnessGradient = textureGradient(footprint, edge1, edge2,
         triangle.metallicRoughnessUv0, triangle.metallicRoughnessUv1, triangle.metallicRoughnessUv2);
     float3 mr = sampleTexture(images, samplers, material.pbrMetallicRoughnessTexture,
         material.pbrMetallicRoughnessSampler, triangle.metallicRoughnessUv0,
-        triangle.metallicRoughnessUv1, triangle.metallicRoughnessUv2, bary, metallicRoughnessGradient);
+        triangle.metallicRoughnessUv1, triangle.metallicRoughnessUv2, bary, metallicRoughnessGradient).rgb;
     result.metallic = saturate(material.pbrMetallicRoughnessFactor.x * mr.b);
     result.roughness = saturate(material.pbrMetallicRoughnessFactor.y * mr.g);
 
@@ -166,7 +170,7 @@ SurfaceMaterial materialAt(
         triangle.emissiveUv0, triangle.emissiveUv1, triangle.emissiveUv2);
     result.emission = material.emissiveFactor.rgb * sampleTexture(images, samplers, material.emissiveTexture,
         material.emissiveSampler, triangle.emissiveUv0, triangle.emissiveUv1, triangle.emissiveUv2,
-        bary, emissiveGradient);
+        bary, emissiveGradient).rgb;
 
     result.diffuseOnly = material.flags.y == 0;
     return result;
@@ -183,7 +187,7 @@ float3 lightEmission(
 {
     GltfMaterial material = materials[light.info.x];
     return material.emissiveFactor.rgb * sampleTexture(images, samplers, material.emissiveTexture,
-        material.emissiveSampler, light.uv01.xy, light.uv01.zw, light.uv2.xy, bary, float2(0));
+        material.emissiveSampler, light.uv01.xy, light.uv01.zw, light.uv2.xy, bary, float2(0)).rgb;
 }
 
 // True when any triangle blocks the segment from `origin` to `origin + direction * distance`. The
@@ -253,7 +257,7 @@ float3 applyNormalMap(
 
     float2 gradient = textureGradient(footprint, edge1, edge2, uv0, uv1, uv2);
     float3 sampled = sampleTexture(images, samplers, material.normalTexture, material.normalSampler,
-        uv0, uv1, uv2, bary, gradient);
+        uv0, uv1, uv2, bary, gradient).rgb;
     float3 tangentNormal = float3((sampled.xy * 2 - 1) * material.normalScale, sampled.z * 2 - 1);
     return normalize(tangentNormal.x * tangent + tangentNormal.y * bitangent + tangentNormal.z * normal);
 }

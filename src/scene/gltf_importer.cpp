@@ -1064,12 +1064,6 @@ void GltfImporter::bindTexture(
     sampler = samplerFor(state);
 }
 
-void GltfImporter::reportUnsupportedMaterial(const tinygltf::Material& material)
-{
-    if (material.alphaMode != "OPAQUE")
-        ignore("alpha modes other than OPAQUE (" + material.alphaMode + ")");
-}
-
 void GltfImporter::importMaterials()
 {
     m_bindings.reserve(m_model->materials.size());
@@ -1085,6 +1079,15 @@ void GltfImporter::importMaterials()
         material.pbrMetallicRoughnessFactor.y = float(pbr.roughnessFactor);
         material.flags.x = source.doubleSided ? 1u : 0u;
         material.flags.y = 1u; // Enable the metallic-roughness response.
+        // glTF alpha handling. The raster preview discards MASK fragments below the cutoff and draws
+        // BLEND in a second, sorted pass; the path tracer reads neither and treats every surface as
+        // opaque.
+        material.flags.z = alphaModeOpaque;
+        if (source.alphaMode == "MASK")
+            material.flags.z = alphaModeMask;
+        else if (source.alphaMode == "BLEND")
+            material.flags.z = alphaModeBlend;
+        material.pbrMetallicRoughnessFactor.z = float(source.alphaCutoff);
 
         float emissiveStrength = 1.0f;
         if (const tinygltf::Value* ext = extension(source.extensions, "KHR_materials_emissive_strength"))
@@ -1132,18 +1135,16 @@ void GltfImporter::importMaterials()
         material.normalScale = float(source.normalTexture.scale);
         material.occlusionStrength = float(source.occlusionTexture.strength);
 
-        reportUnsupportedMaterial(source);
-
         m_materialIds.push_back(uint32_t(m_scene->materials.size()));
         m_bindings.push_back(binding);
         m_scene->materials.push_back(material);
     }
 
-    // The glTF default material: white, fully metallic, fully rough, single sided.
+    // The glTF default material: white, fully metallic, fully rough, single sided, opaque.
     GltfMaterial fallback;
     fallback.pbrBaseColorFactor = vec4(1.0f);
-    fallback.pbrMetallicRoughnessFactor = vec4(1.0f, 1.0f, 0.0f, 0.0f);
-    fallback.flags = uvec4(0, 1, 0, 0);
+    fallback.pbrMetallicRoughnessFactor = vec4(1.0f, 1.0f, 0.5f, 0.0f);
+    fallback.flags = uvec4(0, 1, alphaModeOpaque, 0);
     m_defaultMaterial = uint32_t(m_scene->materials.size());
     m_scene->materials.push_back(fallback);
 }

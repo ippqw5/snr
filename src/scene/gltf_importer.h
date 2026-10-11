@@ -103,7 +103,6 @@ private:
     // Registers `sampler` and returns its index, sharing one entry across identical states.
     int  samplerFor(const TextureSampler& sampler);
     int  imageOf(const tinygltf::Texture& texture);
-    void reportUnsupportedMaterial(const tinygltf::Material& material);
 
     // Accessors
     bool readAttribute(int accessorIndex, int type, std::vector<float>& values);

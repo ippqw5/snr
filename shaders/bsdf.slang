@@ -3,6 +3,9 @@ import sampling;
 struct SurfaceMaterial
 {
     float3 baseColor;
+    // Coverage of the base color, the factor's alpha times the texture's. The BSDF ignores it; the
+    // raster preview uses it to discard MASK fragments and to blend BLEND ones.
+    float alpha;
     // Radiance the surface emits, after the emissive texture is applied. It is not part of the BSDF;
     // the integrator adds it when a path lands on the surface.
     float3 emission;

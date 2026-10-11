@@ -25,6 +25,19 @@ static std::string jsonWrap(TextureWrap wrap)
     }
 }
 
+static std::string jsonAlphaMode(uint mode)
+{
+    switch (mode)
+    {
+    case alphaModeMask:
+        return "\"MASK\"";
+    case alphaModeBlend:
+        return "\"BLEND\"";
+    default:
+        return "\"OPAQUE\"";
+    }
+}
+
 std::string sceneJson(const Scene& scene)
 {
     std::string json = "{\n";
@@ -79,6 +92,8 @@ std::string sceneJson(const Scene& scene)
               + ", \"metallic\": " + jsonNumber(material.pbrMetallicRoughnessFactor.x)
               + ", \"roughness\": " + jsonNumber(material.pbrMetallicRoughnessFactor.y)
               + ", \"doubleSided\": " + (material.flags.x ? "true" : "false")
+              + ", \"alphaMode\": " + jsonAlphaMode(material.flags.z)
+              + ", \"alphaCutoff\": " + jsonNumber(material.pbrMetallicRoughnessFactor.z)
               + ", \"baseColorTexture\": " + jsonTexture(material.pbrBaseColorTexture)
               + ", \"baseColorSampler\": " + jsonTexture(material.pbrBaseColorSampler)
               + ", \"metallicRoughnessTexture\": " + jsonTexture(material.pbrMetallicRoughnessTexture)

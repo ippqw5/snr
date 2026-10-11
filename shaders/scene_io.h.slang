@@ -86,6 +86,13 @@ SNR_IO_STATIC_ASSERT(sizeof(Light) == 96);
 // Sentinel for "this instance emits no light".
 static const uint noLight = 0xffffffffu;
 
+// glTF alpha modes, stored in GltfMaterial::flags.z. OPAQUE ignores the base color alpha, MASK
+// discards a fragment whose alpha is below the cutoff, and BLEND keeps it for the sorted transparent
+// pass.
+static const uint alphaModeOpaque = 0;
+static const uint alphaModeMask = 1;
+static const uint alphaModeBlend = 2;
+
 // Upper bounds on the bindless texture and sampler arrays the shader declares. The host sizes its
 // descriptor pool from these and refuses a model that needs more, so both sides stay in step.
 static const int SNR_MAX_TEXTURES = 1024;
@@ -102,8 +109,8 @@ struct GltfMaterial
 {
     float4 pbrBaseColorFactor = float4(0.75f, 0.75f, 0.75f, 1.0f);      // pbrMetallicRoughness.baseColorFactor
     float4 emissiveFactor = float4(0.0f);                               // emissiveFactor, scaled by emissiveStrength
-    float4 pbrMetallicRoughnessFactor = float4(0.0f, 1.0f, 0.0f, 0.0f); // Metallic, Roughness, reserved
-    uint4  flags = uint4(1, 0, 0, 0);                                   // Double sided, PBR enabled, reserved
+    float4 pbrMetallicRoughnessFactor = float4(0.0f, 1.0f, 0.0f, 0.0f); // Metallic, Roughness, alphaCutoff, reserved
+    uint4  flags = uint4(1, 0, 0, 0);                                   // Double sided, PBR enabled, alpha mode, reserved
     int    pbrBaseColorTexture = -1;                                    // Index into images[]
     int    pbrBaseColorSampler = 0;                                     // Index into samplers[]
     int    pbrMetallicRoughnessTexture = -1;

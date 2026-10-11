@@ -186,6 +186,12 @@ float4 rasterFS(
     SurfaceInteraction surface =
         surfaceAt(images, samplers, instance, triangle, material, bary, view, 0.0);
 
+    // glTF alpha: MASK drops fragments whose coverage is below the cutoff. BLEND has no sorted pass
+    // yet, so it is shaded opaque; the coverage then goes unused.
+    uint  alphaMode = material.flags.z;
+    if (alphaMode == alphaModeMask && surface.material.alpha < material.pbrMetallicRoughnessFactor.z)
+        discard;
+
     return float4(shadeRaster(surface, view), 1);
 }
 
