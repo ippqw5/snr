@@ -36,6 +36,51 @@ void setTransform(Instance& instance, const glm::mat4& transform)
         instance.normalRows[row] = vec4(normal[0][row], normal[1][row], normal[2][row], 0.0f);
     }
 }
+
+// Folds a texture coordinate into [0, 1) the way the sampler would, so the host test below agrees
+// with the texture unit about which texel a UV reads.
+float wrapCoordinate(float coordinate, TextureWrap wrap)
+{
+    switch (wrap)
+    {
+    case TextureWrap::ClampToEdge:
+        return glm::clamp(coordinate, 0.0f, 1.0f);
+    case TextureWrap::MirrorRepeat:
+    {
+        const float period = std::floor(coordinate);
+        const float fraction = coordinate - period;
+        return (int(period) & 1) == 0 ? fraction : 1.0f - fraction;
+    }
+    default:
+        return coordinate - std::floor(coordinate);
+    }
+}
+
+// Nearest read of the emissive texture's base level, matching the sampler's wrap. This only decides
+// whether a triangle emits at all; the shader still samples the texture itself, with filtering.
+vec3 sampleEmissive(const TextureData& texture, const TextureSampler& sampler, vec2 uv)
+{
+    if (texture.levels.empty() || texture.width <= 0 || texture.height <= 0)
+        return vec3(0.0f);
+
+    const float u = wrapCoordinate(uv.x, sampler.wrapU);
+    const float v = wrapCoordinate(uv.y, sampler.wrapV);
+    const int   x = glm::clamp(int(u * float(texture.width)), 0, texture.width - 1);
+    const int   y = glm::clamp(int(v * float(texture.height)), 0, texture.height - 1);
+    const std::vector<uint8_t>& level = texture.levels.front();
+    const size_t offset = (size_t(y) * size_t(texture.width) + size_t(x)) * 4;
+    if (offset + 3 >= level.size())
+        return vec3(0.0f);
+
+    vec3 color(
+        float(level[offset + 0]) / 255.0f,
+        float(level[offset + 1]) / 255.0f,
+        float(level[offset + 2]) / 255.0f
+    );
+    // The texture unit decodes sRGB before the shader sees it, so decode here too or a dark sRGB texel
+    // would look brighter on the host than it does in the shader.
+    return texture.srgb ? glm::pow(color, vec3(2.2f)) : color;
+}
 } // namespace
 
 uint32_t Scene::addMaterial(vec3 color, vec3 emission)
@@ -106,29 +151,87 @@ void Scene::finalize()
 void Scene::buildLights()
 {
     lights.clear();
+    triangleLights.clear();
+    lightCdf.clear();
+
+    // Power of each emitted light, parallel to `lights`, used below to sample lights by brightness.
+    std::vector<float> weights;
     for (Instance& instance : instances)
     {
-        const Primitive& primitive = primitives[instance.primitive];
-        const vec3       emission = vec3(materials[primitive.material].emissiveFactor);
+        const Primitive&   primitive = primitives[instance.primitive];
+        const GltfMaterial& material = materials[primitive.material];
+        const vec3         emission = vec3(material.emissiveFactor);
         if (glm::dot(emission, emission) <= 0.0f)
         {
             instance.lightBase = noLight;
             continue;
         }
 
-        // Every triangle of an emissive primitive emits, so a hit's light is lightBase + triangle.
-        instance.lightBase = uint32_t(lights.size());
+        // A texture can leave most of a primitive black, and every extra light dilutes next-event
+        // estimation. Keep a triangle only when its texture is not black where it is sampled; a
+        // pruned triangle still emits on a direct hit, it is just not in the light list.
+        const bool            textured = material.emissiveTexture >= 0
+                                      && material.emissiveTexture < int(textures.size())
+                                      && !samplers.empty();
+        const TextureData*    texture = textured ? &textures[material.emissiveTexture] : nullptr;
+        const TextureSampler* sampler = textured ? &samplers[size_t(material.emissiveSampler) % samplers.size()] : nullptr;
+
+        // Reserve this instance's window in the remap table before appending any entry.
+        const uint32_t windowBase = uint32_t(triangleLights.size());
         for (uint32_t k = 0; k < primitive.triangleCount; ++k)
         {
-            const Triangle& triangle = triangles[primitive.firstTriangle + k];
-            Light           light = {};
-            light.p0 = vec4(transformPoint(instance.transformRows, vec3(triangle.p0)), 0.0f);
-            light.p1 = vec4(transformPoint(instance.transformRows, vec3(triangle.p1)), 0.0f);
-            light.p2 = vec4(transformPoint(instance.transformRows, vec3(triangle.p2)), 0.0f);
+            const glm::uvec3& triangle = indices[primitive.firstTriangle + k];
+            const vec2 uv0 = emissiveUvs[primitive.vertexBase + triangle.x];
+            const vec2 uv1 = emissiveUvs[primitive.vertexBase + triangle.y];
+            const vec2 uv2 = emissiveUvs[primitive.vertexBase + triangle.z];
+            vec3 emitted = emission;
+            if (texture != nullptr)
+            {
+                emitted = sampleEmissive(*texture, *sampler, (uv0 + uv1 + uv2) / 3.0f) * emission;
+                if (glm::dot(emitted, emitted) <= 0.0f)
+                {
+                    triangleLights.push_back(-1);
+                    continue;
+                }
+            }
+
+            const vec3 p0 = transformPoint(instance.transformRows, positions[primitive.vertexBase + triangle.x]);
+            const vec3 p1 = transformPoint(instance.transformRows, positions[primitive.vertexBase + triangle.y]);
+            const vec3 p2 = transformPoint(instance.transformRows, positions[primitive.vertexBase + triangle.z]);
+
+            Light light = {};
+            light.p0 = vec4(p0, 0.0f);
+            light.p1 = vec4(p1, 0.0f);
+            light.p2 = vec4(p2, 0.0f);
             light.info = uvec4(primitive.material, 0, 0, 0);
+            light.uv01 = vec4(uv0, uv1);
+            light.uv2 = vec4(uv2, 0.0f, 0.0f);
+            triangleLights.push_back(int32_t(lights.size()));
             lights.push_back(light);
+
+            // Emitted radiance times the world-space area, so a light's chance of being sampled follows
+            // the light it actually casts.
+            const vec3  luminance(0.2126f, 0.7152f, 0.0722f);
+            const float area = 0.5f * glm::length(glm::cross(p1 - p0, p2 - p0));
+            weights.push_back(glm::dot(emitted, luminance) * area);
         }
+
+        // Mark the window addressable only when something in it emitted; a fully black emitter stays
+        // unlisted and its -1 entries are never read.
+        const bool anyEmitted = std::any_of(
+            triangleLights.begin() + windowBase,
+            triangleLights.end(),
+            [](int32_t index) { return index >= 0; }
+        );
+        instance.lightBase = anyEmitted ? windowBase : noLight;
     }
+
+    // Prefix sum of the powers. The shader samples a uniform value in [0, lightCdf.back()) and reads
+    // the light off the interval it lands in; the trailing entry is the total.
+    lightCdf.reserve(lights.size() + 1);
+    lightCdf.push_back(0.0f);
+    for (float weight : weights)
+        lightCdf.push_back(lightCdf.back() + weight);
 }
 
 void Scene::computeBounds()

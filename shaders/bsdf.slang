@@ -3,8 +3,13 @@ import sampling;
 struct SurfaceMaterial
 {
     float3 baseColor;
+    // Radiance the surface emits, after the emissive texture is applied. It is not part of the BSDF;
+    // the integrator adds it when a path lands on the surface.
+    float3 emission;
     float metallic;
     float roughness;
+    // Ambient occlusion from the occlusion map, 1 when there is none. It scales the diffuse response.
+    float occlusion;
     bool diffuseOnly;
 };
 
@@ -57,7 +62,7 @@ float specularProbability(SurfaceMaterial material, float cosine)
 
     float3 fresnel = fresnelSchlick(specularReflectance(material), cosine);
     float specular = luminance(fresnel);
-    float diffuse = luminance((1 - fresnel) * material.baseColor) * (1 - material.metallic);
+    float diffuse = luminance((1 - fresnel) * material.baseColor * material.occlusion) * (1 - material.metallic);
     return clamp(specular / max(specular + diffuse, 1e-8), 0.05, 0.95);
 }
 
@@ -82,7 +87,7 @@ BsdfEvaluation evaluateBsdf(SurfaceMaterial material, float3 normal, float3 wo, 
 
     if (material.diffuseOnly)
     {
-        result.value = material.baseColor / kPi;
+        result.value = material.occlusion * material.baseColor / kPi;
         result.pdf = nl / kPi;
         return result;
     }
@@ -92,7 +97,8 @@ BsdfEvaluation evaluateBsdf(SurfaceMaterial material, float3 normal, float3 wo, 
     float vh = saturate(dot(wo, halfVector));
     float3 fresnel = fresnelSchlick(specularReflectance(material), vh);
     float pSpecular = specularProbability(material, nv);
-    result.value = (1 - fresnel) * material.baseColor * (1 - material.metallic) / kPi;
+    // Occlusion scales only the diffuse lobe; the specular reflectance is left alone.
+    result.value = (1 - fresnel) * material.baseColor * material.occlusion * (1 - material.metallic) / kPi;
     result.pdf = (1 - pSpecular) * nl / kPi;
     if (!isSmooth(material))
     {
@@ -143,7 +149,7 @@ BsdfSample sampleBsdf(SurfaceMaterial material, float3 normal, float3 wo, inout 
     if (material.diffuseOnly)
     {
         result.direction = cosineHemisphere(normal, rng);
-        result.weight = material.baseColor;
+        result.weight = material.occlusion * material.baseColor;
         result.pdf = max(0.0f, dot(normal, result.direction)) / kPi;
         return result;
     }

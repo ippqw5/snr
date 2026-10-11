@@ -23,14 +23,20 @@ code is organized, and where it is heading.
 Rendering runs on Vulkan through [slang-rhi](https://github.com/shader-slang/slang-rhi), using
 hardware ray queries rather than a software traversal.
 
-- glTF 2.0 import via tinygltf: triangle meshes, PBR metallic-roughness materials, base-color and
-  metallic-roughness textures with per-slot UV sets and UV transforms, node hierarchy with
-  instancing, and selection among multiple glTF scenes.
-- Built-in scenes for validation: a Cornell box, a furnace test, and an optional studio rig (ground
-  plane plus area light) that can be added to a loaded model.
+- glTF 2.0 import via tinygltf: triangle meshes, PBR metallic-roughness materials, and the core
+  material texture slots — base color, metallic-roughness, normal, occlusion and emissive — with
+  per-slot UV sets and UV transforms, node hierarchy with instancing, and selection among multiple
+  glTF scenes.
+- An optional studio rig: a ground plane and an area light that can be added to a loaded model with
+  `--studio`.
 - Integrator: path tracing with next-event estimation (NEE) for emissive triangles, multiple
   importance sampling (power heuristic) between BSDF and light sampling, GGX/VNDF specular with a
-  Smith visibility term, cosine-weighted diffuse, and Russian roulette after the third bounce.
+  Smith visibility term, cosine-weighted diffuse, and Russian roulette after the third bounce. Lights
+  are sampled in proportion to their emitted power, and a textured emitter contributes only its
+  non-black triangles so small emitters do not dilute the sampling.
+- Material detail: normal mapping uses Mikkelsen's derivative-free tangent frame, built from each
+  triangle's world-space edges and its normal-map UVs because ray-traced hits have no screen-space
+  derivatives; the occlusion map scales the diffuse lobe.
 - Progressive rendering: samples accumulate into a film buffer in batches, so a session can be
   resumed or extended up to a target sample count.
 - Output: tone-mapped 8-bit PNG plus a full-precision linear HDR image, with a configurable exposure

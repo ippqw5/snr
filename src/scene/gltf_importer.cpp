@@ -55,6 +55,32 @@ constexpr const char* supportedExtensions[] = {
     "KHR_materials_emissive_strength",
 };
 
+// glTF models a material's texture slots with three distinct types -- TextureInfo,
+// NormalTextureInfo and OcclusionTextureInfo -- that carry the same index/texCoord/extensions fields.
+// These adapters let a single bind path handle any of them.
+tinygltf::TextureInfo textureInfo(const tinygltf::TextureInfo& info)
+{
+    return info;
+}
+
+tinygltf::TextureInfo textureInfo(const tinygltf::NormalTextureInfo& info)
+{
+    tinygltf::TextureInfo result;
+    result.index = info.index;
+    result.texCoord = info.texCoord;
+    result.extensions = info.extensions;
+    return result;
+}
+
+tinygltf::TextureInfo textureInfo(const tinygltf::OcclusionTextureInfo& info)
+{
+    tinygltf::TextureInfo result;
+    result.index = info.index;
+    result.texCoord = info.texCoord;
+    result.extensions = info.extensions;
+    return result;
+}
+
 bool validWrap(int mode)
 {
     return mode == repeat || mode == clampToEdge || mode == mirroredRepeat;
@@ -633,10 +659,16 @@ uint32_t GltfImporter::buildPrimitive(const tinygltf::Primitive& primitive)
         material = m_materialIds[size_t(primitive.material)];
     }
 
-    std::vector<glm::vec2> baseUv, roughnessUv;
+    std::vector<glm::vec2> baseUv, roughnessUv, normalUv, occlusionUv, emissiveUv;
     if (!readUv(primitive, binding->baseColor, vertexCount, baseUv))
         return badPrimitive;
     if (!readUv(primitive, binding->metallicRoughness, vertexCount, roughnessUv))
+        return badPrimitive;
+    if (!readUv(primitive, binding->normal, vertexCount, normalUv))
+        return badPrimitive;
+    if (!readUv(primitive, binding->occlusion, vertexCount, occlusionUv))
+        return badPrimitive;
+    if (!readUv(primitive, binding->emissive, vertexCount, emissiveUv))
         return badPrimitive;
 
     std::vector<uint32_t> indices;
@@ -1068,11 +1100,9 @@ void GltfImporter::importMaterials()
             emissiveStrength = 0.0f;
         }
 
-        // emissiveFactor only scales the emissive texture, so without texture support keeping it
-        // would make every surface of the material emit white.
-        const bool textured = source.emissiveTexture.index >= 0;
-        const vec3 emitted = textured ? vec3(0.0f) : factor3(source.emissiveFactor, vec3(0.0f));
-        material.emissiveFactor = vec4(emitted * emissiveStrength, 0.0f);
+        // emissiveFactor scales the emissive texture, so it is kept even when the texture is present;
+        // the shader multiplies the two together.
+        material.emissiveFactor = vec4(factor3(source.emissiveFactor, vec3(0.0f)) * emissiveStrength, 0.0f);
 
         MaterialBindings binding;
         bindTexture(
@@ -1089,6 +1119,18 @@ void GltfImporter::importMaterials()
             material.pbrMetallicRoughnessTexture,
             material.pbrMetallicRoughnessSampler
         );
+        // Normal and occlusion hold data, not colour, so they stay linear; emissive is colour.
+        bindTexture(textureInfo(source.normalTexture), false, binding.normal, material.normalTexture, material.normalSampler);
+        bindTexture(
+            textureInfo(source.occlusionTexture),
+            false,
+            binding.occlusion,
+            material.occlusionTexture,
+            material.occlusionSampler
+        );
+        bindTexture(textureInfo(source.emissiveTexture), true, binding.emissive, material.emissiveTexture, material.emissiveSampler);
+        material.normalScale = float(source.normalTexture.scale);
+        material.occlusionStrength = float(source.occlusionTexture.strength);
 
         reportUnsupportedMaterial(source);
 

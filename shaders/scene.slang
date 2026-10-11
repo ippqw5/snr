@@ -146,61 +146,116 @@ bool traceScene(float3 origin, float3 direction, float tMax, bool anyHit, out Hi
     return true;
 }
 
-int wrapTexel(int x, int size, uint mode)
+// A ray tracer has no screen-space derivatives, so Sample()'s implicit LOD cannot pick a mip. The
+// footprint of the ray cone at the hit is converted into texture space with the triangle's texel
+// density (UV area per world area) and passed to SampleGrad as an isotropic gradient.
+float2 textureGradient(float footprint, float3 edge1, float3 edge2, float2 uv0, float2 uv1, float2 uv2)
 {
-    if (mode == 33071)
-        return clamp(x, 0, size - 1);
-    int period = mode == 33648 ? size * 2 : size;
-    x = ((x % period) + period) % period;
-    return mode == 33648 && x >= size ? period - x - 1 : x;
+    float worldArea = length(cross(edge1, edge2));
+    float2 duv1 = uv1 - uv0;
+    float2 duv2 = uv2 - uv0;
+    float uvArea = abs(duv1.x * duv2.y - duv1.y * duv2.x);
+    float density = sqrt(max(uvArea, 1e-20) / max(worldArea, 1e-20));
+    float g = footprint * density;
+    return float2(g, g);
 }
 
-float3 fetchTexel(int4 textureInfo, uint2 wrap, int2 p)
+float3 sampleTexture(int textureIndex, int samplerIndex, float2 uv0, float2 uv1, float2 uv2, float2 bary, float2 gradient)
 {
-    int x = wrapTexel(p.x, textureInfo.y, wrap.x);
-    int y = wrapTexel(p.y, textureInfo.z, wrap.y);
-    return texels[textureInfo.x + y * textureInfo.y + x].rgb;
-}
-
-float wrapCoordinate(float uv, uint mode)
-{
-    if (mode == 33071)
-        return saturate(uv);
-    return mode == 33648 ? 1 - abs(frac(uv * 0.5) * 2 - 1) : frac(uv);
-}
-
-// sampler holds the wrap modes in .xy and the point-filter flag in .z.
-float3 sampleTexture(int4 textureInfo, uint4 sampler, float4 uv01, float4 uv2, float2 bary)
-{
-    if (textureInfo.x < 0)
+    if (textureIndex < 0)
         return 1;
-    float2 uv = uv01.xy * (1 - bary.x - bary.y) + uv01.zw * bary.x + uv2.xy * bary.y;
-    uv = float2(wrapCoordinate(uv.x, sampler.x), wrapCoordinate(uv.y, sampler.y));
-    float2 p = uv * float2(textureInfo.yz);
-    if (sampler.z == 1)
-        return fetchTexel(textureInfo, sampler.xy, int2(floor(p)));
-
-    p -= 0.5;
-    int2 lo = int2(floor(p));
-    float2 f = frac(p);
-    return lerp(lerp(fetchTexel(textureInfo, sampler.xy, lo),
-                    fetchTexel(textureInfo, sampler.xy, lo + int2(1, 0)), f.x),
-                lerp(fetchTexel(textureInfo, sampler.xy, lo + int2(0, 1)),
-                    fetchTexel(textureInfo, sampler.xy, lo + int2(1, 1)), f.x), f.y);
+    float2 uv = uv0 * (1 - bary.x - bary.y) + uv1 * bary.x + uv2 * bary.y;
+    Texture2D<float4> image = images[uint(textureIndex)];
+    SamplerState sampler = samplers[uint(samplerIndex)];
+    return image.SampleGrad(sampler, uv, gradient, gradient).rgb;
 }
 
-SurfaceMaterial materialAt(Triangle triangle, GltfMaterial material, float2 bary)
+SurfaceMaterial materialAt(Instance instance, Triangle triangle, GltfMaterial material, float2 bary, float footprint)
 {
-    SurfaceMaterial result = {};
-    result.baseColor = material.pbrBaseColorFactor.rgb * sampleTexture(material.pbrBaseColorTexture,
-        material.pbrBaseColorSampler, triangle.baseColorUv01, triangle.baseColorUv2, bary);
+    float3 a = transformPoint(instance, triangle.p0);
+    float3 b = transformPoint(instance, triangle.p1);
+    float3 c = transformPoint(instance, triangle.p2);
+    float3 edge1 = b - a;
+    float3 edge2 = c - a;
 
+    SurfaceMaterial result = {};
+    float2 baseColorGradient = textureGradient(footprint, edge1, edge2,
+        triangle.baseColorUv0, triangle.baseColorUv1, triangle.baseColorUv2);
+    result.baseColor = material.pbrBaseColorFactor.rgb * sampleTexture(material.pbrBaseColorTexture,
+        material.pbrBaseColorSampler, triangle.baseColorUv0, triangle.baseColorUv1, triangle.baseColorUv2,
+        bary, baseColorGradient);
+
+    float2 metallicRoughnessGradient = textureGradient(footprint, edge1, edge2,
+        triangle.metallicRoughnessUv0, triangle.metallicRoughnessUv1, triangle.metallicRoughnessUv2);
     float3 mr = sampleTexture(material.pbrMetallicRoughnessTexture, material.pbrMetallicRoughnessSampler,
-        triangle.metallicRoughnessUv01, triangle.metallicRoughnessUv2, bary);
+        triangle.metallicRoughnessUv0, triangle.metallicRoughnessUv1, triangle.metallicRoughnessUv2,
+        bary, metallicRoughnessGradient);
     result.metallic = saturate(material.pbrMetallicRoughnessFactor.x * mr.b);
     result.roughness = saturate(material.pbrMetallicRoughnessFactor.y * mr.g);
+
+    // Occlusion is the red channel of its own map; the strength lerps between no effect and full.
+    float2 occlusionGradient = textureGradient(footprint, edge1, edge2,
+        triangle.occlusionUv0, triangle.occlusionUv1, triangle.occlusionUv2);
+    float occlusion = sampleTexture(material.occlusionTexture, material.occlusionSampler,
+        triangle.occlusionUv0, triangle.occlusionUv1, triangle.occlusionUv2, bary, occlusionGradient).r;
+    result.occlusion = lerp(1.0, occlusion, material.occlusionStrength);
+
+    // Emission is the emissive factor times its texture; light sampling computes the same value, so a
+    // directly hit emitter and a sampled one agree for multiple importance sampling.
+    float2 emissiveGradient = textureGradient(footprint, edge1, edge2,
+        triangle.emissiveUv0, triangle.emissiveUv1, triangle.emissiveUv2);
+    result.emission = material.emissiveFactor.rgb * sampleTexture(material.emissiveTexture,
+        material.emissiveSampler, triangle.emissiveUv0, triangle.emissiveUv1, triangle.emissiveUv2,
+        bary, emissiveGradient);
+
     result.diffuseOnly = material.flags.y == 0;
     return result;
+}
+
+// Emitted radiance of a light triangle at barycentric (bary.x, bary.y), for next-event estimation.
+// The same expression materialAt() uses, so the two estimators agree; the mip is level 0 because a
+// light sample is a single point with no footprint to blur by.
+float3 lightEmission(Light light, float2 bary)
+{
+    GltfMaterial material = materials[light.info.x];
+    return material.emissiveFactor.rgb * sampleTexture(material.emissiveTexture, material.emissiveSampler,
+        light.uv01.xy, light.uv01.zw, light.uv2.xy, bary, float2(0));
+}
+
+// Mikkelsen's derivative-free tangent frame. A ray tracer has no ddx/ddy, so the frame comes from the
+// triangle's own world-space edges and its normal-map UVs: dP/du and dP/dv give the tangents, which
+// are orthogonalised against the interpolated shading normal. The sampled tangent-space normal then
+// perturbs that normal.
+float3 applyNormalMap(float3 normal, GltfMaterial material, Triangle triangle, Instance instance, float2 bary, float footprint)
+{
+    if (material.normalTexture < 0)
+        return normal;
+
+    float2 uv0 = triangle.normalUv0;
+    float2 uv1 = triangle.normalUv1;
+    float2 uv2 = triangle.normalUv2;
+    float2 duv1 = uv1 - uv0;
+    float2 duv2 = uv2 - uv0;
+    float determinant = duv1.x * duv2.y - duv1.y * duv2.x;
+    // Degenerate UVs leave the tangent direction undefined; keep the interpolated normal.
+    if (abs(determinant) < 1e-12)
+        return normal;
+
+    float3 a = transformPoint(instance, triangle.p0);
+    float3 b = transformPoint(instance, triangle.p1);
+    float3 c = transformPoint(instance, triangle.p2);
+    float3 edge1 = b - a;
+    float3 edge2 = c - a;
+    float invDet = 1 / determinant;
+    float3 tangent = normalize((edge1 * duv2.y - edge2 * duv1.y) * invDet);
+    // Re-orthogonalise against the normal being perturbed, then rebuild a right-handed frame.
+    tangent = normalize(tangent - normal * dot(normal, tangent));
+    float3 bitangent = cross(normal, tangent);
+
+    float2 gradient = textureGradient(footprint, edge1, edge2, uv0, uv1, uv2);
+    float3 sampled = sampleTexture(material.normalTexture, material.normalSampler, uv0, uv1, uv2, bary, gradient);
+    float3 tangentNormal = float3((sampled.xy * 2 - 1) * material.normalScale, sampled.z * 2 - 1);
+    return normalize(tangentNormal.x * tangent + tangentNormal.y * bitangent + tangentNormal.z * normal);
 }
 
 struct SurfaceInteraction
@@ -239,11 +294,35 @@ SurfaceInteraction surfaceAt(Instance instance, Triangle triangle, GltfMaterial 
 
     surface.geometricNormal = ng;
     surface.normal = dot(normal, wo) > 0 ? normal : ng;
-    surface.material = materialAt(triangle, material, bary);
+    surface.material = materialAt(instance, triangle, material, bary, footprint);
     return surface;
 }
 
-float lightPdf(Light light, float3 from, float3 to)
+// Picks a light from the cumulative power distribution. `target` is uniform in [0, total); the light
+// is the interval it lands in. Lights with no power own an empty interval and are never chosen.
+uint sampleLightIndex(float target)
+{
+    uint low = 0;
+    uint high = params.integrator.z;
+    while (low < high)
+    {
+        uint mid = (low + high) / 2;
+        if (lightCdf[mid] <= target)
+            low = mid + 1;
+        else
+            high = mid;
+    }
+    return low == 0 ? 0 : low - 1;
+}
+
+// Probability that sampleLightIndex() returns `index`, the width of its interval over the total.
+float selectProbability(uint index)
+{
+    float total = lightCdf[params.integrator.z];
+    return total > 0 ? (lightCdf[index + 1] - lightCdf[index]) / total : 0;
+}
+
+float lightPdf(uint lightIndex, Light light, float3 from, float3 to)
 {
     float3 delta = to - from;
     float distanceSquared = dot(delta, delta);
@@ -252,8 +331,11 @@ float lightPdf(Light light, float3 from, float3 to)
     float cosine = dot(crossEdges / twiceArea, -normalize(delta));
     if (materials[light.info.x].flags.x != 0)
         cosine = abs(cosine);
-    if (cosine <= 0 || params.integrator.z == 0)
+    float selectPdf = selectProbability(lightIndex);
+    if (cosine <= 0 || selectPdf <= 0)
         return 0;
 
-    return distanceSquared / (cosine * 0.5f * twiceArea * params.integrator.z);
+    // Area pdf is selectPdf / area, so the solid-angle pdf multiplies the distance over cosine and
+    // divides by the selection probability and the area.
+    return distanceSquared * selectPdf / (cosine * 0.5f * twiceArea);
 }
