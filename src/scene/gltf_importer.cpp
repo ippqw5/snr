@@ -37,8 +37,7 @@ static_assert(std::endian::native == std::endian::little);
 // A texture may hold at most 4096 x 4096 pixels.
 constexpr size_t maxTexturePixel = 16 * 1024 * 1024;
 
-// Sentinels for "already reported as unusable".
-constexpr size_t   badTexel = size_t(-1);
+// Sentinel for "already reported as unusable".
 constexpr uint32_t badPrimitive = UINT32_MAX;
 
 // Guards against a cyclic children list in a malformed file.

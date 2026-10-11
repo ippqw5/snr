@@ -70,7 +70,5 @@ private:
     void computeBounds();
 };
 
-Scene makeCornellBox();
-Scene makeFurnaceScene();
-void  addStudio(Scene& scene);
+void addStudio(Scene& scene);
 } // namespace snr

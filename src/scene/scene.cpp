@@ -89,35 +89,6 @@ uint32_t Scene::addInstance(const glm::mat4& transform, uint32_t primitive)
 
 void Scene::finalize()
 {
-    if (!looseTriangles.empty())
-    {
-        assert(looseTriangles.size() == looseMaterials.size());
-
-        // Group the authored triangles by material, in order of first use, so each primitive
-        // ends up with a single material.
-        std::vector<uint32_t> used;
-        for (uint32_t material : looseMaterials)
-        {
-            if (std::find(used.begin(), used.end(), material) == used.end())
-                used.push_back(material);
-        }
-
-        for (uint32_t material : used)
-        {
-            const uint32_t first = uint32_t(triangles.size());
-            for (size_t i = 0; i < looseTriangles.size(); ++i)
-            {
-                if (looseMaterials[i] == material)
-                    triangles.push_back(looseTriangles[i]);
-            }
-            const uint32_t primitive = addPrimitive(first, uint32_t(triangles.size()) - first, material);
-            addInstance(glm::mat4(1.0f), primitive);
-        }
-
-        looseTriangles.clear();
-        looseMaterials.clear();
-    }
-
     buildLights();
     computeBounds();
 }
@@ -211,55 +182,6 @@ void Scene::resetDerived()
     errors.clear();
     warnings.clear();
     currentScene = -1;
-}
-
-static void addBox(Scene& scene, vec3(center), vec3 size, float angle, uint32_t material)
-{
-    vec3  p[8];
-    float c = std::cos(angle), s = std::sin(angle);
-    for (int i = 0; i < 8; i++)
-    {
-        vec3 q = (vec3(i & 1, (i >> 1) & 1, (i >> 2) & 1) - 0.5f) * size;
-        p[i] = center + vec3(c * q.x + s * q.z, q.y, -s * q.x + c * q.z);
-    }
-    scene.addQuad(p[0], p[4], p[6], p[2], material);
-    scene.addQuad(p[1], p[3], p[7], p[5], material);
-    scene.addQuad(p[0], p[1], p[5], p[4], material);
-    scene.addQuad(p[2], p[6], p[7], p[3], material);
-    scene.addQuad(p[0], p[2], p[3], p[1], material);
-    scene.addQuad(p[4], p[5], p[7], p[6], material);
-}
-
-Scene makeCornellBox()
-{
-    Scene s;
-    auto  white = s.addMaterial(vec3(0.73f));
-    auto  red = s.addMaterial(vec3(0.63f, 0.065f, 0.05f));
-    auto  green = s.addMaterial(vec3(0.14f, 0.45f, 0.091f));
-    auto  light = s.addMaterial(vec3(0), vec3(14.0f, 12.8f, 10.5f));
-    s.addQuad({-1, 0, 1}, {1, 0, 1}, {1, 0, -1}, {-1, 0, -1}, white);
-    s.addQuad({-1, 2, -1}, {1, 2, -1}, {1, 2, 1}, {-1, 2, 1}, white);
-    s.addQuad({-1, 0, -1}, {1, 0, -1}, {1, 2, -1}, {-1, 2, -1}, white);
-    s.addQuad({-1, 0, 1}, {-1, 0, -1}, {-1, 2, -1}, {-1, 2, 1}, red);
-    s.addQuad({1, 0, -1}, {1, 0, 1}, {1, 2, 1}, {1, 2, -1}, green);
-    s.addQuad({-0.33f, 1.985f, -0.3f}, {0.33f, 1.985f, -0.3f},
-              {0.33f, 1.985f, 0.25f}, {-0.33f, 1.985f, 0.25f}, light);
-    addBox(s, {-0.4f, 0.32f, 0.35f}, {0.62f, 0.64f, 0.62f}, -0.28f, white);
-    addBox(s, {0.36f, 0.63f, -0.3f}, {0.62f, 1.26f, 0.62f}, 0.3f, white);
-    s.finalize();
-    return s;
-}
-
-Scene makeFurnaceScene()
-{
-    Scene s;
-    auto  matte = s.addMaterial(vec3(0.6f, 0.4f, 0.2f));
-    s.addQuad({-100, -100, 0}, {100, -100, 0}, {100, 100, 0}, {-100, 100, 0}, matte);
-    s.eye = {0, 0, 2};
-    s.target = {0, 0, 0};
-    s.environment = vec3(1);
-    s.finalize();
-    return s;
 }
 
 void addStudio(Scene& scene)

@@ -15,7 +15,6 @@ code is organized, and where it is heading.
 | --- | --- |
 | glTF 2.0 loading | Working (`.gltf` and `.glb`) |
 | GPU path tracing | Working (hardware ray queries, progressive accumulation) |
-| Built-in test scenes | Working (Cornell box, furnace, studio rig) |
 | Neural post-pipeline | Planned |
 | Neural in-pipeline | Planned |
 
@@ -40,25 +39,29 @@ hardware ray queries rather than a software traversal.
 ## Architecture
 
 The code is split so that CPU-side scene description, GPU resources, and the render loop are
-independent of one another.
+independent of one another. A detailed walkthrough of the scene data model, the host/device
+boundary, and the path-tracing algorithm is in [docs/architecture.md](docs/architecture.md).
 
 ```
 src/
   gpu/        DeviceContext (Vulkan device, queue, validation) and ShaderLibrary
               (Slang module loading, compute pipeline cache), plus buffer helpers
   scene/      Scene (CPU-side geometry/material/light data), GltfImporter
-              (glTF -> Scene), GpuScene (buffer upload and acceleration structures)
+              (glTF -> Scene), GpuScene (buffer upload and acceleration structures),
+              sceneJson (scene serialization for --inspect)
   render/     RenderSession (synchronous progressive renderer), Film (accumulation
               and display buffers), RenderSettings/RenderResult, render() one-shot entry
   io/         PNG and HDR image output
+  util/       CommandLine (option registry that owns both parsing and usage) and a
+              minimal JSON writer
+  pathtracer.cpp  pathtracer command-line front end (owns main)
 shaders/      Slang sources compiled at runtime by ShaderLibrary
-main.cpp      pathtracer command-line front end
 cmake/        dependency wiring (Slang from the Vulkan SDK or a source build)
 ```
 
 ### Rendering flow
 
-1. `main.cpp` parses the command line, builds a `Scene` (built-in or imported from glTF), and calls
+1. `pathtracer.cpp` parses the command line, imports a glTF model into a `Scene`, and calls
    `render()`.
 2. `render()` creates a `DeviceContext`, loads `pathtracer.slang` into a `ShaderLibrary`, and opens a
    `RenderSession`.
@@ -112,26 +115,24 @@ layout. If you build Slang yourself, point `-Dslang_DIR` at its `lib/cmake/slang
 The `pathtracer` executable is the only front end.
 
 ```sh
-# Built-in scenes
-pathtracer --scene cornell --output output/cornell.png
-pathtracer --scene furnace --spp 1024
-
 # A Khronos sample asset, lit with a studio rig
 pathtracer --model DamagedHelmet --studio --width 1280 --height 720
+
+# A model from an explicit path
+pathtracer --model ./my-scene.glb --spp 512 --output output/my-scene.png
 
 # List the models available under the asset directory
 pathtracer --list-models
 
-# Inspect a scene's JSON without creating a GPU device
-pathtracer --inspect --model Sponza
+# Dump the derived scene as JSON, without creating a GPU device
+pathtracer --model DamagedHelmet --inspect
 ```
 
 Common options:
 
 | Option | Meaning |
 | --- | --- |
-| `--scene cornell\|furnace` | Select a built-in scene |
-| `--model NAME_OR_PATH` | Khronos sample-asset name, or a path to a `.gltf`/`.glb` |
+| `--model NAME_OR_PATH` | Khronos sample-asset name, or a path to a `.gltf`/`.glb` (required) |
 | `--asset-dir PATH` | Directory used for model-name lookup |
 | `--width N --height N` | Image resolution (default 800x800) |
 | `--spp N --batch-size N` | Target samples per pixel and per-dispatch batch size |
@@ -140,10 +141,11 @@ Common options:
 | `--camera X Y Z --target X Y Z --fov DEG` | Camera override |
 | `--environment VALUE` | Constant linear environment radiance |
 | `--studio` | Add a floor and area light to a glTF model |
-| `--pfm` | Also write a full-precision linear image |
 | `--no-nee` | Disable next-event estimation |
 | `--shader-dir PATH` | Override the shader source directory |
 | `--validate` | Enable RHI and Vulkan validation |
+| `--inspect` | Print the derived scene as JSON and exit, without a GPU device |
+| `--help` | Print the option list |
 
 ## Roadmap: neural rendering in pure Slang
 

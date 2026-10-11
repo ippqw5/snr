@@ -12,6 +12,8 @@ find_package(Python3 COMPONENTS Interpreter REQUIRED)
 include(cmake/Dependencies.cmake)
 
 file(GLOB_RECURSE SNR_SOURCES CONFIGURE_DEPENDS src/*.cpp)
+# The CLI front end owns main(), so it belongs to the executable rather than the library.
+list(FILTER SNR_SOURCES EXCLUDE REGEX "pathtracer\\.cpp$")
 add_library(snr STATIC ${SNR_SOURCES})
 target_include_directories(snr PUBLIC src)
 target_include_directories(snr PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
@@ -25,7 +27,7 @@ target_link_libraries(snr PUBLIC
 )
 target_compile_options(snr PRIVATE -Wall -Wextra -Wpedantic)
 
-add_executable(pathtracer main.cpp)
+add_executable(pathtracer src/pathtracer.cpp)
 target_link_libraries(pathtracer PRIVATE snr)
 target_compile_definitions(pathtracer PRIVATE
     SNR_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/shaders"
