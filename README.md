@@ -30,14 +30,17 @@ camera, film and image-output code: a path tracer and a forward raster preview.
   `--raster`. The rasterizer shades each surface once in a fragment shader — emissive, an
   environment-radiance ambient term and an analytic light loop whose shadow rays are traced inline
   against the scene's acceleration structure — so it gives an immediate preview without the cost of
-  tracing, at the price of no indirect light.
+  tracing, at the price of no indirect light. glTF alpha modes are honoured: MASK cuts off below the
+  material's cutoff, and BLEND instances are drawn after everything else, sorted back to front and
+  blended over the result. The pass also writes an object-id target naming the instance under each
+  pixel.
   With `--window` the raster preview runs interactively in a GLFW window (mouse orbit/pan/dolly).
   Both paths evaluate materials through one shared Slang module and leave the image pipeline through
   one shared tonemap, so they cannot drift apart.
 - glTF 2.0 import via tinygltf: triangle meshes, PBR metallic-roughness materials, and the core
   material texture slots — base color, metallic-roughness, normal, occlusion and emissive — with
-  per-slot UV sets and UV transforms, node hierarchy with instancing, and selection among multiple
-  glTF scenes.
+  per-slot UV sets and UV transforms, alpha modes (`OPAQUE`/`MASK`/`BLEND` and `alphaCutoff`), node
+  hierarchy with instancing, and selection among multiple glTF scenes.
 - An optional studio rig: a ground plane and an area light that can be added to a loaded model with
   `--studio`.
 - Integrator: path tracing with next-event estimation (NEE) for emissive triangles, multiple

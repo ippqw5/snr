@@ -1,12 +1,14 @@
 // Forward, single-pass raster preview: a peer of pathtracer.slang over the same scene snapshot.
 //
-// One graphics pipeline draws every instance once. The vertex shader pulls its triangle's corners out
-// of the scene's index and position arrays -- no vertex or index buffer is bound -- and projects them
-// with the precomputed view-projection rows. The fragment shader then evaluates the same glTF
-// material the path tracer does, because material_eval.h.slang is shared between the two, and shades
-// it with emission, an ambient term from the constant environment, and a contribution from the
-// scene's light list that an inline ray query shadows: the fragment shader traces one occlusion ray
-// per light sample against the same acceleration structure the path tracer uses.
+// The vertex shader pulls each triangle's corners out of the scene's index and position arrays -- no
+// vertex or index buffer is bound -- and projects them with the precomputed view-projection rows. The
+// same vertex and fragment pair backs two pipelines: one draws the opaque and MASK instances, the
+// other the glTF BLEND ones, which arrive sorted back to front after them. The fragment shader then
+// evaluates the same glTF material the path tracer does, because material_eval.h.slang is shared
+// between the two, and shades it with emission, an ambient term from the constant environment, and a
+// contribution from the scene's light list that an inline ray query shadows: the fragment shader
+// traces one occlusion ray per light sample against the same acceleration structure the path tracer
+// uses.
 //
 // Because RASTER_PIPELINE is defined, the shared texture fetch uses implicit-LOD Sample(), which a
 // fragment shader can do because it has screen-space derivatives; this is also what gives the preview
@@ -195,17 +197,28 @@ RasterOutput rasterFS(
     SurfaceInteraction surface =
         surfaceAt(images, samplers, instance, triangle, material, bary, view, 0.0);
 
-    // glTF alpha: MASK drops fragments whose coverage is below the cutoff. BLEND has no sorted pass
-    // yet, so it is shaded opaque; the coverage then goes unused.
-    uint alphaMode = material.flags.z;
-    if (alphaMode == alphaModeMask && surface.material.alpha < material.pbrMetallicRoughnessFactor.z)
-        discard;
+    // glTF alpha: MASK drops fragments whose coverage is below the cutoff, and its survivors are
+    // opaque. BLEND keeps the coverage as the fragment's opacity, which the transparent pipeline
+    // blends with. OPAQUE writes neither. The colour target's alpha doubles as the film's sample
+    // counter, so only the blended pass may carry coverage into it, and that is the one pipeline that
+    // leaves the alpha it finds alone.
+    uint  alphaMode = material.flags.z;
+    float alpha = 1;
+    if (alphaMode == alphaModeMask)
+    {
+        if (surface.material.alpha < material.pbrMetallicRoughnessFactor.z)
+            discard;
+    }
+    else if (alphaMode == alphaModeBlend)
+    {
+        alpha = surface.material.alpha;
+    }
 
     // The object id names the instance the fragment came from, one-based so the zero the clear leaves
     // in unwritten pixels stays outside the instance range. It is the raster pass's answer to "what is
     // under this pixel", for picking and segmentation; the object-id debug view colours the same index.
     RasterOutput output;
-    output.color = float4(shadeRaster(surface, view), 1);
+    output.color = float4(shadeRaster(surface, view), alpha);
     output.objectId = input.instanceIndex + 1;
     return output;
 }

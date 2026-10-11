@@ -5,8 +5,12 @@
 namespace snr
 {
 // A forward, single-pass raster preview, a peer of PathSession over the same scene snapshot, film and
-// image output. Shading happens once per pixel in the fragment shader of a single graphics pipeline:
-// there is no G-buffer and no second pass.
+// image output. Shading happens once per pixel in the fragment shader; there is no G-buffer and no
+// second pass.
+//
+// Two pipelines share the one fragment shader. The first draws opaque and MASK instances with depth
+// writes on; the second draws glTF BLEND instances after them, sorted back to front, blending over the
+// colour rather than writing it. Both are recorded into a single render pass.
 //
 // The colour target is offscreen rather than a swapchain image, so a window can replace it later
 // without changing the pass. Whatever the fragment shader writes is copied into the film's
@@ -29,7 +33,7 @@ public:
 private:
     void createTargets(ImageSize size);
 
-    rhi::ComPtr<rhi::IRenderPipeline>  m_pipeline;
+    rhi::ComPtr<rhi::IRenderPipeline>  m_pipeline, m_blendPipeline;
     rhi::ComPtr<rhi::IRenderPipeline>  m_present;
     rhi::Format                        m_presentFormat = rhi::Format::Undefined;
     rhi::ComPtr<rhi::ITexture>         m_color, m_depth, m_objectId;

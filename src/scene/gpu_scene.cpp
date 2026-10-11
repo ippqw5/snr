@@ -74,10 +74,21 @@ GpuScene::GpuScene(DeviceContext& context, const Scene& scene)
     m_lightCdf = upload(device, scene.lightCdf);
 
     // The raster preview draws one instance per draw call, so each instance records the primitive it
-    // references and that primitive's triangle count for the draw's vertex count.
+    // references and that primitive's triangle count for the draw's vertex count. The alpha mode and
+    // the instance's world origin come along too: the first picks the draw's group, the second orders
+    // the transparent group. The origin is the transform's translation, which is what the fourth
+    // column of each row holds.
     m_draws.reserve(scene.instances.size());
     for (const Instance& instance : scene.instances)
-        m_draws.push_back({instance.primitive, scene.primitives[instance.primitive].triangleCount});
+    {
+        const GltfMaterial& material = scene.materials[instance.material];
+        m_draws.push_back({
+            instance.primitive,
+            scene.primitives[instance.primitive].triangleCount,
+            material.flags.z == alphaModeBlend,
+            glm::vec3(instance.transformRows[0].w, instance.transformRows[1].w, instance.transformRows[2].w),
+        });
+    }
 
     // Each image becomes one hardware texture with its full mip chain, and each distinct sampler
     // state one sampler object. The material records name them by index, so the shader's bindless

@@ -10,11 +10,17 @@
 namespace snr
 {
 // One instance's draw record for the raster pass: the primitive it draws and that primitive's
-// triangle count, which together give the draw's vertex count (3 * triangleCount).
+// triangle count, which together give the draw's vertex count (3 * triangleCount), plus what the pass
+// needs to place the draw in one of its two groups.
 struct InstanceDraw
 {
     uint32_t primitive;
     uint32_t triangleCount;
+    // Set when the instance's material is glTF BLEND, which draws after the opaque group, unsorted
+    // depth writes off, into the colour already there.
+    bool blend;
+    // World-space instance origin, the key the transparent group is sorted back to front by.
+    glm::vec3 origin;
 };
 
 // An immutable GPU snapshot. CPU scene data is not retained after upload.

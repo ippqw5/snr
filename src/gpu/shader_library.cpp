@@ -113,11 +113,14 @@ IComputePipeline* ShaderLibrary::computePipeline(const std::string& entryPoint)
 IRenderPipeline* ShaderLibrary::renderPipeline(
     const std::string&             vertexEntryPoint,
     const std::string&             fragmentEntryPoint,
-    const rhi::RenderPipelineDesc& desc
+    const rhi::RenderPipelineDesc& desc,
+    const std::string&             variant
 )
 {
     std::string key = vertexEntryPoint + "|" + fragmentEntryPoint;
-    auto        found = m_renderPipelines.find(key);
+    if (!variant.empty())
+        key += "|" + variant;
+    auto found = m_renderPipelines.find(key);
     if (found != m_renderPipelines.end())
     {
         return found->second;

@@ -14,11 +14,14 @@ public:
 
     rhi::IComputePipeline* computePipeline(const std::string& entryPoint);
     // Composes the vertex and fragment entry points into one program and creates the pipeline from
-    // `desc` (whose program field is filled in here). Cached per entry-point pair.
+    // `desc` (whose program field is filled in here). Cached per entry-point pair and variant, so one
+    // pair of entry points can back several pipeline states -- the raster preview's opaque and blended
+    // passes share theirs.
     rhi::IRenderPipeline* renderPipeline(
-        const std::string&            vertexEntryPoint,
-        const std::string&            fragmentEntryPoint,
-        const rhi::RenderPipelineDesc& desc
+        const std::string&             vertexEntryPoint,
+        const std::string&             fragmentEntryPoint,
+        const rhi::RenderPipelineDesc& desc,
+        const std::string&             variant = {}
     );
     DeviceContext&         context() const
     {

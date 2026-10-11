@@ -208,10 +208,12 @@ used as the shader's hit lookup, the instance mask, and the corresponding BLAS h
 - **Textures and samplers** are written into their **bindless slots** by `setDescriptorHandle`, one
   per registered image/sampler.
 
-`GpuScene::bindRaster()` binds the same buffers **except** `sceneBVH` and `triangleLights`, which the
-raster program never declares: it has no acceleration structure and no light-index remap, so binding
-them would only link a pipeline it does not use. `GpuScene` also exposes one `InstanceDraw`
-(`primitive`, `triangleCount`) per instance for the draw loop in §7.
+`GpuScene::bindRaster()` binds the same buffers **except** `triangleLights`, which the raster program
+never declares. `sceneBVH` *is* bound: the fragment shader's shadow rays are inline queries against the
+same top-level structure the path tracer uses. `GpuScene` also exposes one `InstanceDraw` per instance
+for the draw loop in §7 — the primitive and its triangle count (which together give the draw's vertex
+count), whether the instance's material is glTF BLEND (which picks the draw's group), and the
+instance's world origin (which orders the transparent group).
 
 ## 6. Rendering algorithm
 
@@ -348,17 +350,37 @@ happens in the fragment shader, with no G-buffer and no second pass.
 
 ### 7.1 Pass and draw loop
 
-`render()` records one render pass with an RGBA32Float colour target (cleared to the scene's
-environment radiance, so pixels the geometry misses match the path tracer's miss radiance) and a
-D32Float depth target. The pipeline is built by `ShaderLibrary::renderPipeline("rasterVS", "rasterFS",
-desc)`; the depth test is **reversed-Z** (`clip.z` is the constant near plane and `clip.w` the view
-depth, so stored depth is `near / viewZ`) with `ComparisonFunc::Greater`, which keeps float precision
-uniform and needs no far plane. Culling is off, matching the path tracer's lack of culling.
+`render()` records one render pass with two colour targets — an RGBA32Float colour target (cleared to
+the scene's environment radiance, so pixels the geometry misses match the path tracer's miss radiance)
+and an R32Uint object-id target — plus a D32Float depth target. The depth test is **reversed-Z**
+(`clip.z` is the constant near plane and `clip.w` the view depth, so stored depth is `near / viewZ`)
+with `ComparisonFunc::Greater`, which keeps float precision uniform and needs no far plane. Culling is
+off, matching the path tracer's lack of culling.
+
+Two pipelines share the `rasterVS`/`rasterFS` pair.
+`ShaderLibrary::renderPipeline` is keyed by the entry-point pair **and** a variant name, so asking for
+both returns two distinct pipelines instead of the first one twice:
+
+- the **opaque** pipeline draws every instance whose material is not BLEND, with depth writes on and
+  no blending;
+- the **blend** pipeline draws the BLEND instances after them, with source-over blending
+  (`SrcAlpha`/`InvSrcAlpha`) and depth writes off, and with the alpha channel's blend factors pinned
+  to `Zero`/`One` so the colour target's alpha — the film's sample counter, §6.6 — keeps the value the
+  clear left instead of accumulating coverage.
 
 One draw is issued per instance — `DrawArguments{vertexCount = triangleCount * 3, instanceCount = 1,
 startInstanceLocation = instanceIndex}` — with no vertex or index buffer bound. The instance index
 reaches the vertex shader through `SV_StartInstanceLocation` (`SV_InstanceID` reports
 `instanceID - baseInstance` under D3D semantics and carries nothing usable here).
+
+Both groups are recorded into the one pass, so the transparent group tests against the depth the
+opaque group wrote with no second pass and no depth copy. Shading BLEND later than everything else is
+what makes sorting enough: the pass binds the opaque pipeline, draws, and then — only if the scene has
+a BLEND instance — binds the blend pipeline and draws those, ordered back to front by squared distance
+from the camera eye to each instance's world origin. Binding a pipeline replaces the root object, so
+the constants and the scene arrays are bound again for the second group; the viewport is set again
+alongside them. Sorting whole instances rather than triangles is the approximation a preview can
+afford, and `std::stable_sort` keeps scene order for equal distances.
 
 ### 7.2 Vertex pulling
 
@@ -396,6 +418,19 @@ acceleration structure the path tracer uses, which the raster root signature bin
 geometry buffers. Both endpoints are biased with `offsetRay` exactly as the NEE ray is, so neither the
 receiver nor the emitter self-intersects. The environment term stays unshadowed: a constant
 environment has no direction to trace toward.
+
+`rasterFS` also applies the glTF `alphaMode` the importer stored in `GltfMaterial::flags.z`. A MASK
+fragment whose interpolated base-color alpha is below `alphaCutoff` is discarded, and its survivors
+are opaque; a BLEND fragment passes its coverage on as the fragment's opacity for the blend pipeline
+(§7.1) to blend with; OPAQUE ignores coverage. Only the blended pass may carry coverage into the
+colour target's alpha, because that channel is the film's sample counter (§6.6) — which is exactly why
+the blend pipeline pins its alpha blend factors to `Zero`/`One`.
+
+Every fragment also writes `SV_Target1`, the one-based instance index, so the object-id target records
+which instance is under each pixel for picking or segmentation; unwritten pixels keep the zero the
+clear left, which is outside the instance range. The two outputs are declared as one struct with
+explicit `SV_Target0`/`SV_Target1` members: a return value plus an `out` parameter gets its locations
+assigned in the opposite order, which silently writes the id into the colour target.
 
 So a preview keeps the direct lighting and its shadows but lacks indirect light; that is the
 documented difference from the path tracer.
@@ -478,7 +513,8 @@ pipeline.
                   │      traceMain ──► film (float4 per pixel, accumulative)
                   │
                   └─► RasterSession::render                         [--raster]
-                         rasterVS/rasterFS ──► colour + depth ──► copy ──► film
+                         rasterVS/rasterFS ──► colour + object id ──► copy ──► film
+                                               depth
                   │
                   ▼  Session::readback (either subclass)
               tonemapMain ──► display

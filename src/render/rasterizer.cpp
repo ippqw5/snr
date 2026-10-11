@@ -3,10 +3,12 @@
 #include "./dispatch.h"
 #include "shaders/scene_io.h.slang"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <slang-rhi/shader-cursor.h>
 #include <stdexcept>
+#include <vector>
 
 namespace snr
 {
@@ -73,6 +75,23 @@ RasterSession::RasterSession(ShaderLibrary& shaders, const Scene& scene, const R
     // draws both faces instead of guessing per material.
     desc.rasterizer.cullMode = CullMode::None;
     m_pipeline = shaders.renderPipeline("rasterVS", "rasterFS", desc);
+
+    // The BLEND group draws after that one, over the depth it left. It cannot write depth, or a
+    // nearer transparent surface would hide the ones behind it that still have to blend through, and
+    // it blends source-over so the coverage the fragment shader kept decides how much shows.
+    ColorTargetDesc blendTargets[2] = {targets[0], targets[1]};
+    blendTargets[0].enableBlend = true;
+    blendTargets[0].color.srcFactor = BlendFactor::SrcAlpha;
+    blendTargets[0].color.dstFactor = BlendFactor::InvSrcAlpha;
+    // The colour target's alpha doubles as the film's sample counter (see the readback check in
+    // image_output.cpp), so it keeps the one the clear left instead of collecting coverage.
+    blendTargets[0].alpha.srcFactor = BlendFactor::Zero;
+    blendTargets[0].alpha.dstFactor = BlendFactor::One;
+
+    RenderPipelineDesc blendDesc = desc;
+    blendDesc.targets = blendTargets;
+    blendDesc.depthStencil.depthWriteEnable = false;
+    m_blendPipeline = shaders.renderPipeline("rasterVS", "rasterFS", blendDesc, "blend");
 
     createTargets(settings.imageSize);
 }
@@ -168,32 +187,65 @@ void RasterSession::render()
     auto* pass = encoder->beginRenderPass(passDesc);
     if (!pass)
         throw std::runtime_error("begin raster pass failed");
-    auto* root = pass->bindPipeline(m_pipeline);
-    if (!root)
-        throw std::runtime_error("bind raster pipeline failed");
-
-    ShaderCursor cursor(root);
-    bindConstants(cursor, "rasterParams", &params, sizeof(params));
-    m_scene->bindRaster(cursor);
 
     RenderState state = {};
     state.viewports[0] = Viewport::fromSize(m_settings.imageSize.width, m_settings.imageSize.height);
     state.viewportCount = 1;
     state.scissorRects[0] = ScissorRect::fromSize(m_settings.imageSize.width, m_settings.imageSize.height);
     state.scissorRectCount = 1;
-    pass->setRenderState(state);
+
+    // Binding a pipeline replaces the root object the cursor points into, so the constants and the
+    // scene arrays are bound again for each pipeline. The viewport survives a bind but is cheap to
+    // repeat, and leaving it here keeps the two groups' setup identical.
+    auto bindGroup = [&](IRenderPipeline* pipeline) {
+        auto* root = pass->bindPipeline(pipeline);
+        if (!root)
+            throw std::runtime_error("bind raster pipeline failed");
+        ShaderCursor cursor(root);
+        bindConstants(cursor, "rasterParams", &params, sizeof(params));
+        m_scene->bindRaster(cursor);
+        pass->setRenderState(state);
+    };
 
     // One draw per instance, with no vertex or index buffer bound: the vertex shader pulls its corners
     // from the scene's index and position arrays, and startInstanceLocation carries the instance
     // index, which the vertex shader reads back through SV_StartInstanceLocation.
     const std::vector<InstanceDraw>& draws = m_scene->draws();
-    for (uint32_t index = 0; index < uint32_t(draws.size()); ++index)
-    {
+    auto                             drawInstance = [&](uint32_t index) {
         DrawArguments arguments = {};
         arguments.vertexCount = draws[index].triangleCount * 3;
         arguments.instanceCount = 1;
         arguments.startInstanceLocation = index;
         pass->draw(arguments);
+    };
+
+    // Geometry first, so the transparent group has depth to test against.
+    bindGroup(m_pipeline);
+    std::vector<uint32_t> transparent;
+    for (uint32_t index = 0; index < uint32_t(draws.size()); ++index)
+    {
+        if (draws[index].blend)
+            transparent.push_back(index);
+        else
+            drawInstance(index);
+    }
+
+    if (!transparent.empty())
+    {
+        // Back to front by instance origin: whatever is drawn later blends over what is already in the
+        // colour target, so the farthest goes first. Sorting whole instances rather than triangles is
+        // the approximation a preview can afford, and it is stable so equal distances keep scene
+        // order.
+        const glm::vec3 eye = m_settings.camera.eye;
+        std::stable_sort(transparent.begin(), transparent.end(), [&](uint32_t a, uint32_t b) {
+            const glm::vec3 offsetA = draws[a].origin - eye;
+            const glm::vec3 offsetB = draws[b].origin - eye;
+            return glm::dot(offsetA, offsetA) > glm::dot(offsetB, offsetB);
+        });
+
+        bindGroup(m_blendPipeline);
+        for (uint32_t index : transparent)
+            drawInstance(index);
     }
     pass->end();
 
