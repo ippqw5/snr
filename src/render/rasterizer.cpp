@@ -48,8 +48,10 @@ RasterParams makeRasterParams(const RenderSettings& settings, glm::vec3 environm
     params.viewProjRows[2] = glm::vec4(0, 0, 0, kNear);
     params.viewProjRows[3] = glm::vec4(forward, -glm::dot(forward, camera.eye));
     params.eye = glm::vec4(camera.eye, tanHalf);
-    params.environment = glm::vec4(environment, 0);
-    params.counts = glm::uvec4(lightCount, 0, 0, 0);
+    // The distance to the orbit target is the one scale a preview always has, so the depth debug view
+    // normalises by it and the target sits mid grey.
+    params.environment = glm::vec4(environment, glm::length(camera.target - camera.eye));
+    params.counts = glm::uvec4(lightCount, settings.debugView, 0, 0);
     return params;
 }
 } // namespace
@@ -159,10 +161,12 @@ void RasterSession::render()
     color.loadOp = LoadOp::Clear;
     color.storeOp = StoreOp::Store;
     // Pixels the geometry never covers show the environment, matching the path tracer's miss radiance
-    // rather than a black backdrop.
-    color.clearValue[0] = m_environment.x;
-    color.clearValue[1] = m_environment.y;
-    color.clearValue[2] = m_environment.z;
+    // rather than a black backdrop. A debug view is read as data, not as an image of the scene, so it
+    // starts from black instead.
+    const bool debugView = m_settings.debugView != rasterDebugShaded;
+    color.clearValue[0] = debugView ? 0.0f : m_environment.x;
+    color.clearValue[1] = debugView ? 0.0f : m_environment.y;
+    color.clearValue[2] = debugView ? 0.0f : m_environment.z;
     color.clearValue[3] = 1.0f;
 
     // Object ids are one-based, so the zero a cleared pixel keeps means "nothing here".

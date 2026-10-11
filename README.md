@@ -33,7 +33,8 @@ camera, film and image-output code: a path tracer and a forward raster preview.
   tracing, at the price of no indirect light. glTF alpha modes are honoured: MASK cuts off below the
   material's cutoff, and BLEND instances are drawn after everything else, sorted back to front and
   blended over the result. The pass also writes an object-id target naming the instance under each
-  pixel.
+  pixel, and `--debug` draws one channel of the pass — depth, object id, base color or shading normal
+  — in place of the shaded image.
   With `--window` the raster preview runs interactively in a GLFW window (mouse orbit/pan/dolly).
   Both paths evaluate materials through one shared Slang module and leave the image pipeline through
   one shared tonemap, so they cannot drift apart.
@@ -187,6 +188,7 @@ Common options:
 | `--studio` | Add a floor and area light to a glTF model |
 | `--raster` | Preview with the forward rasterizer instead of path tracing |
 | `--window` | Show the raster preview in an interactive window (implies `--raster`) |
+| `--debug MODE` | Raster debug view: `shaded` (default), `depth`, `object-id`, `base-color`, `normal` (implies `--raster`) |
 | `--no-nee` | Disable next-event estimation |
 | `--shader-dir PATH` | Override the shader source directory |
 | `--validate` | Enable RHI and Vulkan validation |

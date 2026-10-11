@@ -148,7 +148,7 @@ type operand, so the assertions are host-only; the shared definition is what kee
 | `Light` | 96 B | World-space `p0/p1/p2`, an info vector whose `.x` is the material index, and the emitter's UVs |
 | `GltfMaterial` | 112 B | PBR factors, flags, texture/sampler indices for all five slots, and the normal/occlusion scales |
 | `Params` | 112 B | Per-dispatch constants (image, integrator, camera basis, environment) |
-| `RasterParams` | 112 B | Raster constants: view-projection rows, eye + `tan(fov/2)`, environment, light count |
+| `RasterParams` | 112 B | Raster constants: view-projection rows, eye + `tan(fov/2)`, environment + eye-to-target distance, light count + debug view |
 
 Not shared are the vertex attributes. Positions, normals, UVs and indices are each bound as their
 own typed array (`StructuredBuffer<float3>`, `<float2>`, `<uint3>`), which is what lets the elements
@@ -431,6 +431,14 @@ which instance is under each pixel for picking or segmentation; unwritten pixels
 clear left, which is outside the instance range. The two outputs are declared as one struct with
 explicit `SV_Target0`/`SV_Target1` members: a return value plus an `out` parameter gets its locations
 assigned in the opposite order, which silently writes the id into the colour target.
+
+`--debug MODE` replaces the shaded colour with one channel of the pass, selected by
+`RasterParams::counts.y` (one of the `rasterDebug*` constants; every mode but `shaded` also selects
+`--raster`, since the path tracer has no such channels): the linear view depth normalised by the
+eye-to-target distance, a stable hue per object id, the base color, or the shading normal mapped to
+`[0, 1]`. The colour target is then cleared to black instead of the environment, so uncovered pixels
+read as "no data". Debug values are written as if they were radiance, so the HDR output holds them
+unchanged while the PNG shows them through the same tone map as any other frame.
 
 So a preview keeps the direct lighting and its shadows but lacks indirect light; that is the
 documented difference from the path tracer.

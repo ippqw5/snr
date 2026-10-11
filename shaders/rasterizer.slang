@@ -163,6 +163,37 @@ struct RasterPixel
     nointerpolation uint instanceIndex : INSTANCE;
 };
 
+// A stable, evenly spread colour per object id. The golden-ratio hue step keeps successive ids far
+// apart on the colour wheel, so neighbouring instances are never confusable, and an id keeps its
+// colour across runs.
+float3 instanceColor(uint id)
+{
+    float  hue = frac(float(id) * 0.6180339887);
+    float3 rgb = abs(frac(hue + float3(1.0, 2.0 / 3.0, 1.0 / 3.0)) * 6 - 3) - 1;
+    return saturate(rgb);
+}
+
+// The debug views: one channel of the pass drawn as a colour instead of the shaded image. They are
+// display values, not radiance, so they are read through the shared tone map -- the HDR output holds
+// them as written, while the PNG shows them tone mapped like any other frame.
+float3 debugColor(uint view, uint objectId, SurfaceInteraction surface, float3 worldPosition)
+{
+    if (view == rasterDebugDepth)
+    {
+        // Distance along the view axis, normalised by the eye-to-target distance, so the scale follows
+        // the model rather than a fixed near/far pair, the orbit target sits mid grey, and farther
+        // geometry is brighter.
+        float viewZ = dot(rasterParams.viewProjRows[3].xyz, worldPosition - rasterParams.eye.xyz);
+        return float3(saturate(viewZ / max(rasterParams.environment.w, 1e-4)));
+    }
+    if (view == rasterDebugObjectId)
+        return instanceColor(objectId);
+    if (view == rasterDebugBaseColor)
+        return surface.material.baseColor;
+    // rasterDebugNormal: the world-space shading normal, mapped from [-1, 1] to [0, 1].
+    return surface.normal * 0.5 + 0.5;
+}
+
 // The fragment outputs, spelled out with explicit target semantics: a return value plus an `out`
 // parameter get their locations assigned in the wrong order, which silently puts the id in the colour
 // target.
@@ -217,9 +248,15 @@ RasterOutput rasterFS(
     // The object id names the instance the fragment came from, one-based so the zero the clear leaves
     // in unwritten pixels stays outside the instance range. It is the raster pass's answer to "what is
     // under this pixel", for picking and segmentation; the object-id debug view colours the same index.
+    uint   objectId = input.instanceIndex + 1;
+    uint   debugView = rasterParams.counts.y;
+    float3 color = debugView == rasterDebugShaded
+                       ? shadeRaster(surface, view)
+                       : debugColor(debugView, objectId, surface, input.worldPosition);
+
     RasterOutput output;
-    output.color = float4(shadeRaster(surface, view), alpha);
-    output.objectId = input.instanceIndex + 1;
+    output.color = float4(color, alpha);
+    output.objectId = objectId;
     return output;
 }
 

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "shaders/scene_io.h.slang"
+
 #include <cstdint>
 #include <filesystem>
 #include <glm/glm.hpp>
@@ -37,6 +39,9 @@ struct RenderSettings
     // one frame and ignores them.
     uint32_t samplesPerPixel = 256;
     uint32_t batchSize = 16;
+    // Raster preview only: which channel its fragment shader writes to the colour target instead of
+    // the shaded image. One of the rasterDebug* constants; the path tracer ignores it.
+    uint32_t debugView = rasterDebugShaded;
 };
 
 struct DisplaySettings

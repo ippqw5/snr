@@ -139,6 +139,14 @@ struct Params
 };
 SNR_IO_STATIC_ASSERT(sizeof(Params) == 112);
 
+// Channels the raster preview can draw instead of its shaded colour, held in RasterParams::counts.y.
+// Shaded is the normal preview; the rest are debug views of one attachment or one material input.
+static const uint rasterDebugShaded = 0;
+static const uint rasterDebugDepth = 1;
+static const uint rasterDebugObjectId = 2;
+static const uint rasterDebugBaseColor = 3;
+static const uint rasterDebugNormal = 4;
+
 // Per-frame constants for the raster preview. The view-projection is stored as its four rows rather
 // than as a matrix, so the host and the shader cannot disagree on the storage order: clip is
 // (dot(rowX.xyz, p) + rowX.w, dot(rowY.xyz, p) + rowY.w, ...) with p in world space. Each draw
@@ -148,8 +156,9 @@ struct RasterParams
 {
     float4 viewProjRows[4]; // Rows of the world-to-clip matrix
     float4 eye;             // Eye position, w holds tan(fov / 2)
-    float4 environment;     // Constant environment radiance, w reserved
-    uint4  counts;          // Number of lights in the light list, rest reserved
+    float4 environment;     // Constant environment radiance; w is the eye-to-target distance, the
+                            // reference the depth debug view normalises by
+    uint4  counts;          // Number of lights, the debug view (rasterDebug*), rest reserved
 };
 SNR_IO_STATIC_ASSERT(sizeof(RasterParams) == 112);
 

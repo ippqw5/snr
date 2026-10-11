@@ -86,6 +86,7 @@ void renderWindowed(const Scene& scene, const RenderOptions& options)
     auto           setupStart = std::chrono::steady_clock::now();
     DeviceContext  context(options.shaderDir, options.validation);
     RenderSettings settings(options.image, cameraFromScene(scene), options.integrator);
+    settings.debugView = options.debugView;
     ShaderLibrary  shaders(context, "rasterizer.slang");
 
     Window        window("snr", settings.imageSize, context);
@@ -136,6 +137,7 @@ void render(const Scene& scene, const RenderOptions& options)
 
     settings.samplesPerPixel = options.spp;
     settings.batchSize = options.batchSize;
+    settings.debugView = options.debugView;
 
     if (options.mode == RenderingMode::Raster)
     {
