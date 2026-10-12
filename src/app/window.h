@@ -4,6 +4,7 @@
 #include "../render/settings.h"
 
 #include <glm/glm.hpp>
+#include <optional>
 #include <string>
 
 struct GLFWwindow;
@@ -14,8 +15,6 @@ namespace snr
 // surface's configuration: it reconfigures on a framebuffer resize and reports the size, so the
 // renderer keeps its targets in step.
 //
-// Input is polled, except the scroll wheel, which GLFW only reports as an event and which is
-// accumulated in a callback. The camera controller reads deltas relative to the previous pump().
 class Window
 {
 public:
@@ -37,6 +36,12 @@ public:
     // Acquires the next swapchain image, or null when the surface is unconfigured or has none ready.
     rhi::ComPtr<rhi::ITexture> acquireImage();
     void                       present();
+    void                       setTitle(const std::string& title);
+
+    std::optional<uint32_t> numberKeyPressed() const
+    {
+        return m_numberKey;
+    }
 
     glm::vec2 cursorDelta() const
     {
@@ -57,6 +62,7 @@ public:
 
 private:
     static void onScroll(GLFWwindow* window, double x, double y);
+    static void onKey(GLFWwindow* window, int key, int scancode, int action, int mods);
 
     void reconfigure(ImageSize size);
 
@@ -66,12 +72,13 @@ private:
     ImageSize                  m_size{0, 0};
     bool                       m_vsync;
 
-    glm::vec2 m_cursor{0, 0};
-    glm::vec2 m_cursorDelta{0, 0};
-    glm::vec2 m_scroll{0, 0};
-    glm::vec2 m_scrollDelta{0, 0};
-    bool      m_hasCursor = false;
-    bool      m_leftButton = false;
-    bool      m_rightButton = false;
+    glm::vec2               m_cursor{0, 0};
+    glm::vec2               m_cursorDelta{0, 0};
+    glm::vec2               m_scroll{0, 0};
+    glm::vec2               m_scrollDelta{0, 0};
+    bool                    m_hasCursor = false;
+    bool                    m_leftButton = false;
+    bool                    m_rightButton = false;
+    std::optional<uint32_t> m_numberKey = 1;
 };
 } // namespace snr

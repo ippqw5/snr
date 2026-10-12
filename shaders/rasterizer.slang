@@ -90,10 +90,10 @@ RasterVertex rasterVS(uint vertexId : SV_VertexID, uint instanceIndex : SV_Start
     return output;
 }
 
-// Emission, then the environment arriving from every direction, then the scene's lights with a shadow
-// ray each. The environment stays unshadowed because a constant environment has no direction to trace
-// toward; only the analytic lights cast shadows.
-float3 shadeRaster(SurfaceInteraction surface, float3 view)
+// Emission, then the environment arriving from every direction, then area-light samples with shadow
+// rays. The environment stays unshadowed because a constant environment has no direction to trace 
+// toward.
+float3 shadeRaster(SurfaceInteraction surface, float3 view, uint2 pixel)
 {
     SurfaceMaterial material = surface.material;
     float3 radiance = material.emission;
@@ -107,29 +107,33 @@ float3 shadeRaster(SurfaceInteraction surface, float3 view)
         material.baseColor * (1 - material.metallic) * (1 - fresnel) + fresnel;
     radiance += rasterParams.environment.rgb * material.occlusion * ambient;
 
-    // Like the path tracer's next-event estimation, but sampled at each light's centroid rather than
-    // at a random point. The strata are fixed rather than random so the preview is stable from frame
-    // to frame. lightPdf() returns the solid-angle pdf the same way NEE computes it.
-    const uint kMaxLightSamples = 8;
+    const uint kLightSamples = 32;
     uint       lightCount = rasterParams.counts.x;
-    uint       sampleCount = min(kMaxLightSamples, lightCount);
     float      total = lightCdf[lightCount];
-    if (sampleCount > 0 && total > 0)
+    if (kLightSamples > 0 && total > 0)
     {
-        for (uint i = 0; i < sampleCount; ++i)
+        uint rng = hash32(pixel.x ^ hash32(pixel.y));
+        float shift = randomFloat(rng);
+        for (uint i = 0; i < kLightSamples; ++i)
         {
-            float target = total * (float(i) + 0.5) / float(sampleCount);
+            float target = total * (float(i) + randomFloat(rng)) / float(kLightSamples);
+            // Rounding must not put the last sample at the CDF's exclusive upper bound
+            target = min(target, asfloat(asuint(total) - 1u));
             uint  lightIndex = lightIndexFromCdf(target, lightCount);
             Light light = lights[lightIndex];
 
-            float3 centroid = (light.p0.xyz + light.p1.xyz + light.p2.xyz) / 3;
-            float3 delta = centroid - surface.position;
-            float  distance = length(delta);
+            float u = (target - lightCdf[lightIndex]) / (lightCdf[lightIndex + 1] - lightCdf[lightIndex]);
+            float r = sqrt(saturate(u));
+            float v = frac(float(reversebits(i)) * (1.0 / 4294967296.0) + shift);
+            float2 bary = float2(r * (1 - v), r * v);
+            float3 lightPoint = light.p0.xyz * (1 - r) + light.p1.xyz * bary.x + light.p2.xyz * bary.y;
+            float3 delta = lightPoint - surface.position;
+            float distance = length(delta);
             if (distance <= 0)
                 continue;
             float3 wi = delta / distance;
 
-            float pdf = lightPdf(lightIndex, light, surface.position, centroid, lightCount);
+            float pdf = lightPdf(lightIndex, light, surface.position, lightPoint, lightCount);
             float cosine = dot(surface.normal, wi);
             if (pdf <= 0 || cosine <= 0)
                 continue;
@@ -141,17 +145,16 @@ float3 shadeRaster(SurfaceInteraction surface, float3 view)
             if (dot(lightNormal, -wi) < 0)
                 lightNormal = -lightNormal;
             float3 shadowOrigin = offsetRay(surface.position, surface.geometricNormal);
-            float3 shadowTarget = offsetRay(centroid, lightNormal);
+            float3 shadowTarget = offsetRay(lightPoint, lightNormal);
             float3 shadowDelta = shadowTarget - shadowOrigin;
             float  shadowDistance = length(shadowDelta);
             if (shadowDistance <= 0 ||
                 occluded(sceneBVH, shadowOrigin, shadowDelta / shadowDistance, shadowDistance - 1e-4))
                 continue;
 
-            // The centroid is the barycentric (1/3, 1/3), the same point lightPdf() measured.
-            float3 emission = lightEmission(images, samplers, light, float2(1.0 / 3, 1.0 / 3));
+            float3 emission = lightEmission(images, samplers, light, bary);
             BsdfEvaluation bsdf = evaluateBsdf(material, surface.normal, view, wi);
-            radiance += bsdf.value * emission * cosine / (pdf * float(sampleCount));
+            radiance += bsdf.value * emission * cosine / (pdf * float(kLightSamples));
         }
     }
     return radiance;
@@ -159,6 +162,7 @@ float3 shadeRaster(SurfaceInteraction surface, float3 view)
 
 struct RasterPixel
 {
+    float4 pixelPosition : SV_Position;
     float3 worldPosition : POSITION;
     nointerpolation uint instanceIndex : INSTANCE;
 };
@@ -251,7 +255,7 @@ RasterOutput rasterFS(
     uint   objectId = input.instanceIndex + 1;
     uint   debugView = rasterParams.counts.y;
     float3 color = debugView == rasterDebugShaded
-                       ? shadeRaster(surface, view)
+                       ? shadeRaster(surface, view, uint2(input.pixelPosition.xy))
                        : debugColor(debugView, objectId, surface, input.worldPosition);
 
     RasterOutput output;

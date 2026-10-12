@@ -7,6 +7,7 @@
 #include "./rasterizer.h"
 #include "./session.h"
 
+#include <array>
 #include <chrono>
 #include <cstdio>
 #include <glm/gtc/matrix_transform.hpp>
@@ -83,22 +84,52 @@ void reportSetup(std::chrono::steady_clock::time_point setupStart)
 // drawable area and skips the frame.
 void renderWindowed(const Scene& scene, const RenderOptions& options)
 {
+    struct ViewShortcut
+    {
+        uint32_t    view;
+        const char* name;
+    };
+    constexpr std::array<ViewShortcut, 5> views = {{
+        {rasterDebugShaded, "Shaded"},
+        {rasterDebugDepth, "Depth"},
+        {rasterDebugObjectId, "Object ID"},
+        {rasterDebugBaseColor, "Base Color"},
+        {rasterDebugNormal, "Normal"},
+    }};
+
     auto           setupStart = std::chrono::steady_clock::now();
     DeviceContext  context(options.shaderDir, options.validation);
     RenderSettings settings(options.image, cameraFromScene(scene), options.integrator);
-    settings.debugView = options.debugView;
     ShaderLibrary  shaders(context, "rasterizer.slang");
 
-    Window        window("snr", settings.imageSize, context);
+    Window        window("snr | Shaded | 1-5: views", settings.imageSize, context);
     RasterSession session(shaders, scene, settings);
     reportSetup(setupStart);
 
     CameraSettings camera = settings.camera;
+    auto           statsStart = std::chrono::steady_clock::now();
+    uint32_t       frameCount = 0;
+    uint32_t       viewIndex = 0;
     while (window.pump())
     {
+        if (auto key = window.numberKeyPressed(); key && *key >= 1 && *key <= views.size())
+        {
+            if (viewIndex != *key - 1)
+            {
+                viewIndex = *key - 1;
+                session.setDebugView(views[viewIndex].view);
+                window.setTitle(std::string("snr | ") + views[viewIndex].name + " | 1-5: views");
+                statsStart = std::chrono::steady_clock::now();
+                frameCount = 0;
+            }
+        }
         const ImageSize size = window.framebufferSize();
         if (size.width == 0 || size.height == 0)
+        {
+            statsStart = std::chrono::steady_clock::now();
+            frameCount = 0;
             continue;
+        }
 
         if (size != session.settings().imageSize)
             session.resize(size);
@@ -108,11 +139,30 @@ void renderWindowed(const Scene& scene, const RenderOptions& options)
 
         auto image = window.acquireImage();
         if (!image)
+        {
+            statsStart = std::chrono::steady_clock::now();
+            frameCount = 0;
             continue;
+        }
 
         session.render();
         session.present(image, options.display);
         window.present();
+
+        ++frameCount;
+        const auto   now = std::chrono::steady_clock::now();
+        const double elapsed = std::chrono::duration<double>(now - statsStart).count();
+        if (elapsed >= 0.5)
+        {
+            char title[128];
+            std::snprintf(
+                title, sizeof(title), "snr | %s | %.1f FPS | %.2f ms/frame | 1-5: views",
+                views[viewIndex].name, double(frameCount) / elapsed, elapsed * 1000.0 / double(frameCount)
+            );
+            window.setTitle(title);
+            statsStart = now;
+            frameCount = 0;
+        }
     }
 }
 } // namespace
@@ -129,15 +179,14 @@ void render(const Scene& scene, const RenderOptions& options)
         return;
     }
 
-    auto            setupStart = std::chrono::steady_clock::now();
-    DeviceContext   context(options.shaderDir, options.validation);
-    RenderSettings  settings(options.image, cameraFromScene(scene), options.integrator);
-    auto            start = std::chrono::steady_clock::now();
-    RenderResult    result;
+    auto           setupStart = std::chrono::steady_clock::now();
+    DeviceContext  context(options.shaderDir, options.validation);
+    RenderSettings settings(options.image, cameraFromScene(scene), options.integrator);
+    auto           start = std::chrono::steady_clock::now();
+    RenderResult   result;
 
     settings.samplesPerPixel = options.spp;
     settings.batchSize = options.batchSize;
-    settings.debugView = options.debugView;
 
     if (options.mode == RenderingMode::Raster)
     {
@@ -151,7 +200,7 @@ void render(const Scene& scene, const RenderOptions& options)
     else
     {
         ShaderLibrary shaders(context, "pathtracer.slang");
-        PathSession session(shaders, scene, settings);
+        PathSession   session(shaders, scene, settings);
         reportSetup(setupStart);
 
         session.render();

@@ -121,29 +121,9 @@ int main(int argc, char** argv)
         cli.flag("--raster", "Draw with the forward raster preview instead of the path tracer", [&] {
             options.mode = RenderingMode::Raster;
         });
-        cli.flag("--window", "Show the raster preview in an interactive window (implies --raster)", [&] {
+        cli.flag("--window", "Interactive raster preview; keys 1-5 switch views (implies --raster)", [&] {
             options.windowed = true;
             options.mode = RenderingMode::Raster;
-        });
-        cli.custom("--debug", "MODE", "Raster preview debug view: shaded, depth, object-id, base-color, normal", [&](CommandLine& c, int& index) {
-            const std::string mode = c.next(index);
-            if (mode == "shaded")
-                options.debugView = rasterDebugShaded;
-            else if (mode == "depth")
-                options.debugView = rasterDebugDepth;
-            else if (mode == "object-id")
-                options.debugView = rasterDebugObjectId;
-            else if (mode == "base-color")
-                options.debugView = rasterDebugBaseColor;
-            else if (mode == "normal")
-                options.debugView = rasterDebugNormal;
-            else
-                throw std::runtime_error("Unknown debug view: " + mode);
-
-            // The debug views belong to the raster preview's attachments; the path tracer has no
-            // depth, object id or per-fragment material to show, so asking for one selects it.
-            if (options.debugView != rasterDebugShaded)
-                options.mode = RenderingMode::Raster;
         });
         cli.flag("--no-nee", "Disable area-light next-event estimation", [&] { options.integrator.nee = false; });
         cli.flag("--validate", "Enable RHI and Vulkan validation", options.validation);

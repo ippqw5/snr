@@ -36,6 +36,7 @@ Window::Window(const std::string& title, ImageSize size, DeviceContext& context,
 
     glfwSetWindowUserPointer(m_window, this);
     glfwSetScrollCallback(m_window, &Window::onScroll);
+    glfwSetKeyCallback(m_window, &Window::onKey);
 
     m_surface = m_context.device()->createSurface(getWindowHandleFromGLFW(m_window));
     if (!m_surface)
@@ -68,6 +69,18 @@ void Window::onScroll(GLFWwindow* window, double, double y)
     static_cast<Window*>(glfwGetWindowUserPointer(window))->m_scroll += glm::vec2(0, float(y));
 }
 
+void Window::onKey(GLFWwindow* window, int key, int, int action, int)
+{
+    if (action != GLFW_PRESS)
+        return;
+
+    auto* self = static_cast<Window*>(glfwGetWindowUserPointer(window));
+    if (key >= GLFW_KEY_0 && key <= GLFW_KEY_9)
+        self->m_numberKey = uint32_t(key - GLFW_KEY_0);
+    else if (key >= GLFW_KEY_KP_0 && key <= GLFW_KEY_KP_9)
+        self->m_numberKey = uint32_t(key - GLFW_KEY_KP_0);
+}
+
 void Window::reconfigure(ImageSize size)
 {
     // The queue must be idle before the swapchain is torn down or resized.
@@ -93,6 +106,7 @@ bool Window::pump()
 {
     m_scrollDelta = m_scroll;
     m_scroll = glm::vec2(0);
+    m_numberKey.reset();
 
     glfwPollEvents();
 
@@ -132,5 +146,10 @@ ComPtr<ITexture> Window::acquireImage()
 void Window::present()
 {
     checkRhi(m_surface->present(), "present surface");
+}
+
+void Window::setTitle(const std::string& title)
+{
+    glfwSetWindowTitle(m_window, title.c_str());
 }
 } // namespace snr

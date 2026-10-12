@@ -28,14 +28,17 @@ camera, film and image-output code: a path tracer and a forward raster preview.
 
 - Two rendering paths: the path tracer (default) and a single-pass forward rasterizer selected with
   `--raster`. The rasterizer shades each surface once in a fragment shader — emissive, an
-  environment-radiance ambient term and an analytic light loop whose shadow rays are traced inline
-  against the scene's acceleration structure — so it gives an immediate preview without the cost of
-  tracing, at the price of no indirect light. glTF alpha modes are honoured: MASK cuts off below the
+  environment-radiance ambient term and 32 stratified area-light samples whose shadow rays are traced
+  inline against the scene's acceleration structure. Sampling across each emitter produces soft 
+  shadows; the pixel-seeded pattern stays fixed across frames, with some samping grain in penumbrae.
+  The preview omits indirect light. glTF alpha modes are honoured: MASK cuts off below the
   material's cutoff, and BLEND instances are drawn after everything else, sorted back to front and
   blended over the result. The pass also writes an object-id target naming the instance under each
-  pixel, and `--debug` draws one channel of the pass — depth, object id, base color or shading normal
-  — in place of the shaded image.
-  With `--window` the raster preview runs interactively in a GLFW window (mouse orbit/pan/dolly).
+  pixel. In the window, number keys switch between shaded, depth, object-id, base color and normal
+  without restarting the renderer.
+  With `--window` the raster preview runs interactively in a GLFW window (mouse orbit/pan/dolly),
+  and the number keys 1-5 switch the frame between the shaded image and a debug
+  view of one channel — depth, object id, base color or shading normal.
   Both paths evaluate materials through one shared Slang module and leave the image pipeline through
   one shared tonemap, so they cannot drift apart.
 - glTF 2.0 import via tinygltf: triangle meshes, PBR metallic-roughness materials, and the core
@@ -160,7 +163,7 @@ snr --model DamagedHelmet --studio --width 1280 --height 720
 # The same scene through the forward raster preview (direct lighting with shadows, immediate)
 snr --model DamagedHelmet --studio --raster --width 1280 --height 720
 
-# Interactive raster preview in a window: left drag orbits, right drag pans, wheel dollies
+# Interactive raster preview: left drag orbits, right drag pans, wheel dollies, keys 1-5 switch views
 snr --model DamagedHelmet --studio --window --width 1280 --height 720
 
 # A model from an explicit path
@@ -187,8 +190,7 @@ Common options:
 | `--environment VALUE` | Constant linear environment radiance |
 | `--studio` | Add a floor and area light to a glTF model |
 | `--raster` | Preview with the forward rasterizer instead of path tracing |
-| `--window` | Show the raster preview in an interactive window (implies `--raster`) |
-| `--debug MODE` | Raster debug view: `shaded` (default), `depth`, `object-id`, `base-color`, `normal` (implies `--raster`) |
+| `--window` | Interactive raster preview in a GLFW window; keys 1-5 switch the debug view (implies `--raster`) |
 | `--no-nee` | Disable next-event estimation |
 | `--shader-dir PATH` | Override the shader source directory |
 | `--validate` | Enable RHI and Vulkan validation |

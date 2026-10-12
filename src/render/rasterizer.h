@@ -25,6 +25,11 @@ public:
     void resize(ImageSize size) override;
     void render() override;
 
+    void setDebugView(uint32_t view)
+    {
+        m_settings.debugView = view;
+    }
+
     // Tone maps the filled film straight into a swapchain image and submits without waiting, so the
     // caller can present. The present pipeline is created the first time a target format is seen, so
     // the window's surface — not this class — decides the swapchain format.
@@ -33,10 +38,10 @@ public:
 private:
     void createTargets(ImageSize size);
 
-    rhi::ComPtr<rhi::IRenderPipeline>  m_pipeline, m_blendPipeline;
-    rhi::ComPtr<rhi::IRenderPipeline>  m_present;
-    rhi::Format                        m_presentFormat = rhi::Format::Undefined;
-    rhi::ComPtr<rhi::ITexture>         m_color, m_depth, m_objectId;
-    rhi::ComPtr<rhi::ITextureView>     m_colorView, m_depthView, m_objectIdView;
+    rhi::ComPtr<rhi::IRenderPipeline> m_pipeline, m_blendPipeline;
+    rhi::ComPtr<rhi::IRenderPipeline> m_present;
+    rhi::Format                       m_presentFormat = rhi::Format::Undefined;
+    rhi::ComPtr<rhi::ITexture>        m_color, m_depth, m_objectId;
+    rhi::ComPtr<rhi::ITextureView>    m_colorView, m_depthView, m_objectIdView;
 };
 } // namespace snr

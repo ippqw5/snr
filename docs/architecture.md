@@ -432,13 +432,14 @@ clear left, which is outside the instance range. The two outputs are declared as
 explicit `SV_Target0`/`SV_Target1` members: a return value plus an `out` parameter gets its locations
 assigned in the opposite order, which silently writes the id into the colour target.
 
-`--debug MODE` replaces the shaded colour with one channel of the pass, selected by
-`RasterParams::counts.y` (one of the `rasterDebug*` constants; every mode but `shaded` also selects
-`--raster`, since the path tracer has no such channels): the linear view depth normalised by the
-eye-to-target distance, a stable hue per object id, the base color, or the shading normal mapped to
-`[0, 1]`. The colour target is then cleared to black instead of the environment, so uncovered pixels
-read as "no data". Debug values are written as if they were radiance, so the HDR output holds them
-unchanged while the PNG shows them through the same tone map as any other frame.
+The shaded colour can be replaced with one channel of the pass, selected by `RasterParams::counts.y`
+(one of the `rasterDebug*` constants) and switched at runtime by the window's number keys 1-5 through
+`RasterSession::setDebugView()`. The views are a preview aid the path tracer cannot offer, since it
+has no such channels, so they are reachable only from the interactive preview: the linear view depth
+normalised by the eye-to-target distance, a stable hue per object id, the base color, or the shading
+normal mapped to `[0, 1]`. The colour target is then cleared to black instead of the environment, so
+uncovered pixels read as "no data" rather than as the backdrop. Debug values are read as data, not as
+radiance, and still pass through the shared tone map on their way to the swapchain.
 
 So a preview keeps the direct lighting and its shadows but lacks indirect light; that is the
 documented difference from the path tracer.
@@ -459,7 +460,9 @@ With `--window` the headless loop is replaced by an interactive one, and the col
 uses GLFW only for the window and input: the swapchain itself is slang-rhi's, created from
 `getWindowHandleFromGLFW` so the same code path serves Win32, X11 and Cocoa. `pump()` polls events,
 reconfigures the surface on a framebuffer resize and reports the new extent, which `renderWindowed`
-mirrors onto the session with `Session::resize`.
+mirrors onto the session with `Session::resize`. The same loop drives the debug views: a number key
+pressed since the last pump is reported by `numberKeyPressed()`, and `renderWindowed` maps key 1-5 to
+a `rasterDebug*` view and hands it to the session, so the switch costs no extra rendering path.
 
 Each frame is `render()` (the §7.1 pass into the film, unchanged) followed by `present()`. The latter
 runs `presentVS`/`presentFS` — a fullscreen triangle that reads the film at the pixel named by

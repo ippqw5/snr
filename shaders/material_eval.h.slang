@@ -186,8 +186,16 @@ float3 lightEmission(
     float2 bary)
 {
     GltfMaterial material = materials[light.info.x];
-    return material.emissiveFactor.rgb * sampleTexture(images, samplers, material.emissiveTexture,
-        material.emissiveSampler, light.uv01.xy, light.uv01.zw, light.uv2.xy, bary, float2(0)).rgb;
+    if (material.emissiveTexture < 0)
+        return material.emissiveFactor.rgb;
+
+    float2 uv = light.uv01.xy * (1 - bary.x - bary.y) + light.uv01.zw * bary.x + light.uv2.xy * bary.y;
+    Texture2D<float4> image = images[uint(material.emissiveTexture)];
+    SamplerState sampler = samplers[uint(material.emissiveSampler)];
+
+    // Randomized light samples have no screen-space footprint. Implicit derivatives would blur the 
+    // emitter according to unrelated samples in neighboring pixels of the raster preview.
+    return material.emissiveFactor.rgb * image.SampleLevel(sampler, uv, 0).rgb;
 }
 
 // True when any triangle blocks the segment from `origin` to `origin + direction * distance`. The
