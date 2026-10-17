@@ -38,9 +38,13 @@ These instructions apply to the entire repository. Follow them when modifying co
 ## Documentation and development workflow
 
 - Use English for documentation and diagram labels, retaining exact code identifiers.
-- Each topic has one primary home: `README.md` for build, usage and verification;
-  `docs/rendering-flow.md` for execution, ownership, output and reset rules;
-  `docs/architecture.md` for code locations, layouts, binding and shading details.
+- Each topic has one primary home: `README.md` for requirements, build and quick start;
+  `docs/usage.md` for launch modes, interactive controls, CLI options and example image reproduction;
+  `docs/architecture.md` for the system overview, core objects, execution, ownership,
+  output, reset rules and code map; `docs/reference/` for scene data, GPU layouts/resources,
+  light transport, rasterizer and presentation implementation details; `tests/README.md`
+  for renderer smoke tests, integration tests and manual GUI regression checks.
+  Introduce project concepts in the architecture before linking to detailed references.
   Link to the owning section instead of repeating its explanation.
 - Before editing, read the relevant guide section and implementation, including callers.
   Identify affected data owners, CPU/GPU boundaries and invalidated results. Verify contracts
@@ -48,9 +52,10 @@ These instructions apply to the entire repository. Follow them when modifying co
 - When documented behavior or design reasons change, update their owning section and affected
   diagrams in the same change. Remove or merge superseded explanations. Local refactors do not
   need a documentation log. Keep implemented behavior separate from the README roadmap.
-- Follow the build and runtime checks in `README.md#verification`. For UI or accumulation changes,
-  exercise the affected transitions from the rendering guide's reset table. Match verification
-  to the change; documentation-only work needs link and diagram checks, not a renderer build.
+- Follow the build instructions in `README.md` and the renderer tests in `tests/README.md`.
+  For UI or accumulation changes, exercise the affected transitions from the architecture's
+  reset table. Match checks to the change; documentation-only work needs link and diagram checks,
+  not a renderer build.
 - Diagram source and regeneration instructions live in `docs/diagrams/README.md`.
   Keep generated SVGs with their sources. This optional local tool is outside CMake and must
   not download dependencies.

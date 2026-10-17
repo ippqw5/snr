@@ -9,7 +9,7 @@
 <g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(20.16 746.76)">
 <title>path_bounce</title>
 <polygon fill="#ffffff" stroke="none" points="-20.16,20.16 -20.16,-746.76 655.12,-746.76 655.12,20.16 -20.16,20.16"/>
-<text xml:space="preserve" text-anchor="middle" x="317.48" y="-705.5" font-family="Arial" font-size="18.00">03 &#160;The path loop inside one sample</text>
+<text xml:space="preserve" text-anchor="middle" x="317.48" y="-705.5" font-family="Arial" font-size="18.00">The path loop inside one sample</text>
 <text xml:space="preserve" text-anchor="middle" x="317.48" y="-684.5" font-family="Arial" font-size="18.00">The entire path runs in one GPU compute thread</text>
 <!-- start -->
 <g id="node1" class="node">

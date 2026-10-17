@@ -1,7 +1,7 @@
 digraph scene_ownership {
   graph [rankdir=TB, bgcolor="#ffffff", pad=0.28, nodesep=0.28, ranksep=0.38,
          fontname="Arial", fontsize=18, labelloc=t,
-         label="01  Scene data and ownership\nUpload once, share the snapshot, keep separate films"];
+         label="Scene data and ownership\nUpload once, share the snapshot, keep separate films"];
   node [shape=box, style="rounded,filled", fillcolor="#f1f5f9", color="#94a3b8",
         fontcolor="#17283b", fontname="Arial", fontsize=13, margin="0.16,0.10"];
   edge [color="#60758a", fontcolor="#334e68", fontname="Arial", fontsize=11, arrowsize=0.7];

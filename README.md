@@ -1,40 +1,40 @@
 # snr — Slang Neural Renderer
 
 snr is a C++20 / Slang research renderer for glTF scenes on Vulkan through
-[slang-rhi](https://github.com/shader-slang/slang-rhi).
-Launch without arguments or with `--window` for the GUI, or supply a model without `--window`
-for headless rendering.
+[slang-rhi](https://github.com/shader-slang/slang-rhi). It provides an interactive raster preview
+and progressive path tracing. Neural rendering is a [long-term goal](#roadmap).
 
-The long-term goal is neural rendering in pure Slang, with GPU training and inference without
-a PyTorch dependency. See the [roadmap](#roadmap).
+![DamagedHelmet path traced by snr, with a studio floor and point light.](docs/images/damaged-helmet.png)
 
-## Documentation
+DamagedHelmet, rendered in snr at 960 × 640 and 2048 samples per pixel.
+[Reproduce this image and see model credits](docs/usage.md#readme-image).
 
-| Need | Read |
-| --- | --- |
-| Understand ownership, CPU/GPU execution, path tracing and accumulation resets | [Illustrated rendering flow](docs/rendering-flow.md) |
-| Look up code locations, layouts, bindings and shading details | [Architecture reference](docs/architecture.md) |
-| Modify the project with an AI agent | [Repository rules and workflow](AGENTS.md) |
-
-## Status
+## Current capabilities
 
 | Area | Current state |
 | --- | --- |
 | Scene import | glTF 2.0 (`.gltf` / `.glb`), instancing, PBR textures, per-slot UV transforms and alpha modes |
 | Path tracing | Progressive hardware ray queries, NEE, MIS, reflection and transmission |
 | Raster preview | Single-pass forward shading, direct-light shadows and debug views |
-| Materials | Transmission, volume absorption and IOR extensions; [semantics and limits](docs/architecture.md#transmission-and-volume-transport) |
+| Materials | Transmission, volume absorption and IOR extensions; [semantics and limits](docs/reference/light-transport.md#transmission-and-volume-transport) |
 | Utilities | Optional studio floor / point light (`--studio`), tone-mapped PNG and linear HDR output |
 | Neural rendering | Planned; see the [roadmap](#roadmap) |
 
+## Requirements
+
+- A GPU and Vulkan driver supporting **hardware ray queries and bindless descriptors**.
+  Both Raster and Path tracing require these features.
+- A C++20 compiler, CMake 3.25 or newer, Ninja and Python 3.
+  The current Windows build uses Clang.
+- The Vulkan SDK with Slang compiler libraries, headers and `slangc`; set `VULKAN_SDK` to its root.
+- Git and the repository's pinned submodules under `external/`.
+
+Runtime checked on Windows with an NVIDIA GeForce RTX 4070. Other operating systems and GPU
+vendors are unverified. GPU support is determined by the features exposed by the driver.
+
 ## Building
 
-Requirements:
-
-- CMake 3.25 or newer and Ninja
-- A C++20 compiler
-- The Vulkan SDK, with the Slang compiler present (`slangc`) and `VULKAN_SDK` set
-- Git submodules checked out; all third-party source and asset dependencies live under `external/` as pinned submodules
+Run from the repository root, with the compiler and build tools available on PATH:
 
 ```sh
 git submodule update --init --recursive
@@ -42,102 +42,56 @@ cmake --preset default
 cmake --build build
 ```
 
-Two configure presets are provided:
+The default preset uses Slang from the Vulkan SDK. On Windows, the build reconstructs the Slang
+CMake targets from the SDK's binaries and headers. Configuration and builds do not download
+dependencies; initialize the submodules first.
 
-- `default` — uses the Slang package shipped with the Vulkan SDK.
-- `slang-source-build` — uses a Slang source build at `../slang/build-snr/Release/install`.
-
-On Windows the Vulkan SDK ships Slang's binaries and headers but not its CMake package, so
-`cmake/Dependencies.cmake` reconstructs the `slang::slang` and `slang::slangc` targets from that
-layout. If you build Slang yourself, point `-Dslang_DIR` at its `lib/cmake/slang`.
-
-## Usage
-
-The `snr` executable is the only front end.
+For an existing custom Slang installation, override the package directory:
 
 ```sh
-# A Khronos sample asset, lit with a studio rig
-snr --model DamagedHelmet --studio --width 1280 --height 720
-
-# The same scene through the forward raster preview (direct lighting with shadows, immediate)
-snr --model DamagedHelmet --studio --raster --width 1280 --height 720
-
-# Interactive raster preview: left drag orbits, right drag pans, wheel dollies, keys 1-5 switch views
-snr --model DamagedHelmet --studio --window --width 1280 --height 720
-
-# Open the UI, then import a local .gltf or .glb through the file browser
-snr --window --width 1280 --height 800
-
-# A model from an explicit path
-snr --model ./my-scene.glb --spp 512 --output output/my-scene.png
-
-# List the models available under the asset directory
-snr --list-models
-
-# Dump the derived scene as JSON, without creating a GPU device
-snr --model DamagedHelmet --inspect
+cmake --preset default -Dslang_DIR="/path/to/slang/install/lib/cmake/slang"
 ```
 
-### Interactive controls
+The optional `slang-source-build` preset is a local development convenience pointing to
+`../slang/build-snr/Release/install/lib/cmake/slang`. It expects that installation to exist;
+it does not build Slang. The override above accepts another installation layout.
+The Vulkan SDK is still required when using custom Slang.
 
-- **Import glTF / GLB** opens a file browser with path entry, filename filtering and folder navigation.
-  Click a model to import it. Loading progress appears in the UI; further imports are disabled until
-  completion. Failures appear in the panel and console.
-- **Add studio floor and point light** applies to the next import. `--studio` initializes it.
-- **Renderer** selects Raster or Path tracing. Path controls expose target SPP, SPP per frame, bounce
-  count, direct-light sampling, pause and restart. Exposure applies to both renderers.
-  [Accumulation rules](docs/rendering-flow.md#4-what-invalidates-accumulated-samples) explain which changes restart sampling.
-- Left drag orbits, right drag pans, and the wheel changes eye-to-target distance.
-  ImGui-captured input does not move the camera. Keys **1–5** select raster shaded, depth,
-  object-id, base-color and normal views.
-- **Resolution** shows framebuffer and render sizes. **Follow window size** is enabled by default.
-  **Apply window size** changes the main drawable size; disable following and use **Apply resolution**
-  for a fixed film size. Both accept 1–4096 pixels per axis; display fitting preserves aspect ratio.
-- Drag panel titles to dock or detach them. **Panels** reopens closed panels and toggles the fixed
-  bottom-right world axes (red X, green Y, blue Z). Detached panels update while the main window is
-  minimized; closing the main window closes the GUI.
-- The window title is `snr gui`. Scene preview shows the glTF scene name (or model filename),
-  with the full path on hover, FPS, frame time and frame count.
-  **System Information** shows the graphics API, GPU and CPU.
+## Quick start
 
-### Command-line options
+These commands use the Windows executable name and run from the repository root.
+Open the GUI, then use **Import glTF / GLB** to select a model:
 
-| Option | Meaning |
+```sh
+build/snr.exe --window
+```
+
+Or render a bundled Khronos sample asset without opening a window:
+
+```sh
+build/snr.exe --model DamagedHelmet --studio --width 960 --height 640 --spp 256 --output output/damaged-helmet.png
+```
+
+Headless rendering writes the requested PNG and an HDR file with the same basename. The GUI starts
+in Raster mode; select Path tracing to accumulate samples. Full controls, examples and CLI options
+are in [Usage](docs/usage.md).
+
+## Documentation
+
+After your first run, read the
+[architecture](docs/architecture.md) from the system overview through scene preparation,
+rendering, output and state changes. Follow its topic links when you need implementation details.
+
+| Need | Read |
 | --- | --- |
-| `--model NAME_OR_PATH` | Khronos sample-asset name, or a path to a `.gltf`/`.glb` (optional in the UI) |
-| `--asset-dir PATH` | Directory used for model-name lookup |
-| `--width N --height N` | Image resolution (default 800x800) |
-| `--spp N --batch-size N` | Target samples per pixel and per-dispatch batch size |
-| `--max-bounces N --seed N` | Integrator depth and RNG seed |
-| `--exposure STOPS` | Display exposure in stops |
-| `--camera X Y Z --target X Y Z --fov DEG` | Camera override |
-| `--environment VALUE` | Constant linear environment radiance |
-| `--studio` | Add a floor and point light to a glTF model |
-| `--raster` | Preview with the forward rasterizer instead of path tracing |
-| `--window` | Interactive GUI with glTF import, Raster / Path tracing selection, sampling controls and XYZ axes |
-| `--no-nee` | Disable next-event estimation |
-| `--shader-dir PATH` | Override the shader source directory |
-| `--validate` | Enable RHI and Vulkan validation |
-| `--inspect` | Print the derived scene as JSON and exit, without a GPU device |
-| `--help` | Print the option list |
-
-## Verification
-
-After [building](#building), smoke-test changed shaders at runtime; C++ compilation alone does not
-compile the shader entry points. These commands require a supported GPU and the sample-assets submodule:
-
-```sh
-build/snr.exe --model DamagedHelmet --studio --width 64 --height 64 --spp 8 --batch-size 4 --validate --output output/path-check.png
-build/snr.exe --model DamagedHelmet --studio --raster --width 64 --height 64 --validate --output output/raster-check.png
-```
-
-For transmission / volume changes, run the generated-fixture integration checks. They require a GPU
-but no external scene assets, and check absorption, nested media, IOR, TIR, texture sampling,
-refraction displacement and energy conservation using linear HDR output:
-
-```sh
-python tests/test_transmission.py --exe build/snr.exe
-```
+| Use the GUI, choose CLI options or reproduce the example image | [Usage](docs/usage.md) |
+| Understand the system and follow a scene to an image | [Architecture](docs/architecture.md) |
+| Change scene import or CPU representation | [Scene data](docs/reference/scene-data.md) |
+| Change shared layouts, GPU resources or bindings | [GPU resources](docs/reference/gpu-resources.md) |
+| Understand path tracing, materials, sampling or volumes | [Light transport](docs/reference/light-transport.md) |
+| Change Raster or window presentation | [Rasterizer](docs/reference/rasterizer.md) / [Presentation](docs/reference/presentation.md) |
+| Test renderer changes | [Renderer tests](tests/README.md) |
+| Modify the project with an AI agent | [Repository rules and workflow](AGENTS.md) |
 
 ## Roadmap
 

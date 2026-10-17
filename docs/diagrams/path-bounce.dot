@@ -1,7 +1,7 @@
 digraph path_bounce {
   graph [rankdir=TB, bgcolor="#ffffff", pad=0.28, nodesep=0.30, ranksep=0.28,
          fontname="Arial", fontsize=18, labelloc=t,
-         label="03  The path loop inside one sample\nThe entire path runs in one GPU compute thread"];
+         label="The path loop inside one sample\nThe entire path runs in one GPU compute thread"];
   node [shape=box, style="rounded,filled", fillcolor="#e8f1fb", color="#94a3b8",
         fontcolor="#17283b", fontname="Arial", fontsize=13, margin="0.16,0.09"];
   edge [color="#60758a", fontcolor="#334e68", fontname="Arial", fontsize=11, arrowsize=0.7];

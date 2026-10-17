@@ -1,0 +1,23 @@
+digraph system_overview {
+  graph [rankdir=TB, bgcolor="#ffffff", pad=0.28, nodesep=0.30, ranksep=0.38,
+         fontname="Arial", fontsize=18, labelloc=t,
+         label="System overview\nLogical responsibilities and work delegation"];
+  node [shape=box, style="rounded,filled", fillcolor="#f1f5f9", color="#94a3b8",
+        fontcolor="#17283b", fontname="Arial", fontsize=13, margin="0.16,0.10"];
+  edge [color="#60758a", fontcolor="#334e68", fontname="Arial", fontsize=11, arrowsize=0.7];
+  entry [label="main / util\nOptions and model selection"];
+  scene [label="scene\nImport and derive CPU Scene"];
+  render [label="render / renderer\nHeadless orchestration or GUI loop"];
+  app [label="app\nWindow, input and UI"];
+  session [label="render / Session + Film\nRaster frame or path-tracing batches"];
+  gpu [label="scene / GpuScene + gpu services\nUpload, AS builds, shader compilation\nPipeline caching and command submission"];
+  shaders [label="shaders / Slang\nShared materials, light transport\nRaster shading and output transforms", fillcolor="#e8f1fb"];
+  files [label="io / saveImages\nCPU RenderResult to PNG + HDR", fillcolor="#edf5ed"];
+  entry -> scene [label="Load input"];
+  entry -> render [label="Render prepared Scene"];
+  render -> app [label="GUI mode"];
+  render -> session [label="Drive rendering"];
+  session -> gpu [label="GPU services"];
+  session -> shaders [label="Run shaders"];
+  session -> files [label="Headless: read back result\nCaller writes files"];
+}
