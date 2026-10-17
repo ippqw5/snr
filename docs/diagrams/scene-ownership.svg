@@ -9,7 +9,7 @@
 <g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(20.16 503.16)">
 <title>scene_ownership</title>
 <polygon fill="#ffffff" stroke="none" points="-20.16,20.16 -20.16,-503.16 595.57,-503.16 595.57,20.16 -20.16,20.16"/>
-<text xml:space="preserve" text-anchor="middle" x="287.71" y="-461.9" font-family="Arial" font-size="18.00">01 &#160;Scene data and ownership</text>
+<text xml:space="preserve" text-anchor="middle" x="287.71" y="-461.9" font-family="Arial" font-size="18.00">Scene data and ownership</text>
 <text xml:space="preserve" text-anchor="middle" x="287.71" y="-440.9" font-family="Arial" font-size="18.00">Upload once, share the snapshot, keep separate films</text>
 <!-- source -->
 <g id="node1" class="node">

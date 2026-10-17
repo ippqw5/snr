@@ -9,7 +9,7 @@
 <g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(20.16 685.36)">
 <title>sample_batch</title>
 <polygon fill="#ffffff" stroke="none" points="-20.16,20.16 -20.16,-685.36 583.32,-685.36 583.32,20.16 -20.16,20.16"/>
-<text xml:space="preserve" text-anchor="middle" x="281.58" y="-644.1" font-family="Arial" font-size="18.00">02 &#160;One sampling batch and two output paths</text>
+<text xml:space="preserve" text-anchor="middle" x="281.58" y="-644.1" font-family="Arial" font-size="18.00">One sampling batch and two output paths</text>
 <text xml:space="preserve" text-anchor="middle" x="281.58" y="-623.1" font-family="Arial" font-size="18.00">The batch covers the image; each thread owns one pixel</text>
 <!-- step -->
 <g id="node1" class="node">

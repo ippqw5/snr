@@ -1,19 +1,262 @@
-# Architecture reference
+# Architecture
 
-Use this document to look up implementation details. Execution order, ownership, output paths and
-reset rules are explained once in the [illustrated rendering flow](rendering-flow.md).
-Build, usage and verification commands live in the [project README](../README.md).
+After [building and running the project](../README.md#building), read this document from top to
+bottom to understand how a scene becomes an image. It assumes basic C++ and graphics knowledge;
+project-specific objects are introduced before their execution details.
 
-- [Code map](#code-map)
-- [Scene representation](#scene-representation)
-- [Host/device contract](#hostdevice-contract)
-- [GPU resource details](#gpu-resource-details)
-- [Shading details](#shading-details)
-- [Raster implementation](#raster-implementation)
-- [Presentation implementation](#presentation-implementation)
-- [Transmission and volume transport](#transmission-and-volume-transport)
+This document describes the current implementation. The [roadmap](../README.md#roadmap) records
+planned work. Field layouts, shader algorithms and pipeline settings live in the topic references
+linked below.
 
-## Code map
+- [System overview](#system-overview)
+- [Core objects](#core-objects)
+- [From scene to image](#from-scene-to-image)
+- [State changes and resource lifetime](#state-changes-and-resource-lifetime)
+- [Code map and further reading](#code-map-and-further-reading)
+
+## System overview
+
+snr is a C++20 / Slang renderer for glTF scenes. C++ prepares scene data and submits Vulkan work
+through slang-rhi; Slang shaders perform GPU shading. Neural training and inference are planned.
+
+![The entry point selects a scene and render mode. Rendering coordinates the UI and sessions; sessions use GPU services and Slang shaders, then return CPU results for file output.](diagrams/system-overview.svg)
+
+The diagram shows logical responsibilities and work delegation, rather than include dependencies
+or submission timing. The main areas are:
+
+| Area | Responsibility |
+| --- | --- |
+| `src/main.cpp`, `src/util/` | Parse options, select an input model and handle CPU inspection |
+| `src/scene/` | Import glTF, derive CPU scene data and create a GPU scene snapshot |
+| `src/render/` | Coordinate headless / GUI execution, render sessions and image storage |
+| `src/app/` | Manage windows, camera input and UI controls |
+| `src/gpu/` | Manage the device, compile shaders at runtime, cache pipelines and submit commands |
+| `shaders/` | Evaluate shared materials, trace paths, shade raster fragments and transform output |
+| `src/io/` | Write CPU render results to image files |
+
+The GUI starts with Raster for an immediate preview. Path tracing progressively accumulates samples
+for indirect lighting and reflection / transmission paths. Both use the same GPU scene representation,
+shared material evaluation and Film output format. Their lighting methods differ; Raster remains
+a preview approximation. Detailed material support and limits are in
+[light transport](reference/light-transport.md#transmission-and-volume-transport).
+
+## Core objects
+
+| Object | Role |
+| --- | --- |
+| `Scene` | CPU geometry, instances, materials, textures, lights and initial camera |
+| `GpuScene` | Uploaded snapshot: GPU buffers, textures, samplers and acceleration structures |
+| `Session` | Rendering settings and a Film, with a shared reference to a GpuScene |
+| `RasterSession` / `PathSession` | The renderer-specific pipelines and work that fill a Film |
+| `Film` | GPU accumulation / display buffers and a CPU sample counter |
+| `RenderResult` | CPU copies of an image and its sample metadata, returned by readback |
+
+Scene preparation leads to a GpuScene; a Session renders into its Film; readback produces a
+RenderResult when CPU output is needed. These names describe different storage and ownership roles.
+
+![CPU import and derivation produce a GpuScene snapshot. Raster and path sessions share the snapshot while each owns a separate Film.](diagrams/scene-ownership.svg)
+
+Solid arrows show data creation or transfer; dashed arrows show a Session holding a shared
+reference. Session and Film are C++ management objects on the CPU. The buffers, textures and
+acceleration structures they manage reside on the GPU.
+
+A primitive is a triangle range with one material; an instance places a primitive in the world
+with a transform. A bottom-level acceleration structure (BLAS) accelerates one primitive;
+a top-level structure (TLAS) assembles them using instance transforms.
+
+## From scene to image
+
+### CPU preparation
+
+`Scene::loadGltf()` delegates file reading, material import and geometry import to `GltfImporter`.
+`Scene` holds geometry attribute arrays, primitives, instances, materials, textures and lights,
+along with the camera and bounds. The importer retains the parsed glTF model so it can derive
+another glTF scene without reading the file again.
+
+`Scene::finalize()` derives lights, their sampling cumulative distribution (CDF) and bounds from
+the prepared geometry and instances. The CDF selects lights according to their weights.
+The shader consumes these precomputed light records and probabilities; it does
+not rebuild a light list per pixel. `--inspect` exports the CPU data before any GPU device exists,
+which makes it useful for isolating import problems.
+
+See [scene data](reference/scene-data.md) for primitives, instances and local vertex indexing.
+
+### Uploading a GPU snapshot
+
+The `GpuScene` constructor uploads attributes, materials, lights, textures and samplers and builds
+BLAS/TLAS. The same GPU positions and indices buffers serve both acceleration-structure construction
+and shader reads. BLAS build commands are recorded first, followed by a barrier and the TLAS build.
+Submission waits for completion before temporary scratch buffers are released.
+
+`GpuScene` does not retain its input `Scene&`. Subsequent rendering uses the uploaded snapshot.
+A caller may still retain the CPU Scene, but editing it does not update existing GPU resources:
+a new or replacement snapshot is required. Sessions manage their camera, integrator settings and
+environment values separately, with dedicated setters. Integrator settings control light transport,
+including the bounce limit, random seed and next-event estimation (NEE), which samples direct light.
+
+See [GPU resources](reference/gpu-resources.md) for layouts, build inputs and bindings.
+
+### Rendering into Film
+
+Each Film pixel stores **`(radiance sum.rgb, sample count)`**. Radiance is the linear light value
+computed for a sample. Display and export divide the sum by the count to obtain the mean.
+The two renderers produce this same representation in different ways:
+
+| Renderer | Work that fills Film | Result after the work completes |
+| --- | --- | --- |
+| Raster | Draw scene instances into a color target, then copy it into accumulation | One sample per pixel, replacing the previous frame |
+| Path tracing | Dispatch a compute batch whose threads trace camera samples | Add the batch's samples to the current accumulation |
+
+#### Raster frame
+
+`RasterSession::render()` clears its color, object-id and depth targets, then draws OPAQUE / MASK
+instances followed by sorted BLEND instances. Vertex shaders fetch scene geometry; fragment
+shaders evaluate shared materials, direct lighting and the transmission preview. Shadow and
+transmission queries use the same TLAS as path tracing.
+
+After the pass, a texture-to-buffer copy places linear color into Film with a per-pixel count of one.
+The CPU waits for submission to complete before recording one Film sample. Each Raster render
+replaces its previous image. Pipeline variants, alpha handling and debug channels are explained in
+the [rasterizer reference](reference/rasterizer.md).
+
+#### Path-tracing batch
+
+![The CPU checks the target, packs parameters and submits compute work. GPU threads sample pixels and write Film; after waiting, the CPU advances the count. Window display and file export then take different paths.](diagrams/sample-batch.svg)
+
+There are three nested loops. Understanding their boundaries matters more than memorizing class names:
+
+| Loop | Where it runs | Work per iteration |
+| --- | --- | --- |
+| Sampling batch | CPU: `PathSession::renderStep()` | Dispatch one compute pass over the entire image |
+| Samples for one pixel | GPU: the `i` loop in `traceMain()` | A thread computes this batch's camera samples sequentially |
+| Bounces for one sample | GPU: the `bounce` loop in `tracePath()` | Accumulate radiance along the path until termination |
+
+**One displayed frame is not one sample.** The GUI calls renderStep at most once per frame, and a
+batch can contain multiple samples per pixel (SPP). For headless output, `PathSession::render()`
+repeats renderStep until it reaches the target.
+
+**CPU parameters, bindings and submission.**
+
+Suppose Film already contains 8 SPP, the target is 10 SPP, and the batch size is 4 SPP:
+
+1. `renderStep()` chooses `min(4, 10 - 8) = 2` samples for this batch.
+2. `makeParams()` packs camera, environment and integrator values.
+   `Params.image = (width, height, 8, 2)`: `.z` is the starting sample index and `.w` is the batch count.
+3. `dispatchImage()` creates an encoder, inserts a barrier, begins a compute pass and binds the
+   `traceMain` pipeline.
+4. `bindParams()` binds constants, `GpuScene::bind()` binds scene resources, and the caller binds
+   Film accumulation. Binding establishes shader access; it does not upload the scene again.
+5. Dispatch covers `ceil(width / 8) × ceil(height / 8)` thread groups, each containing `8 × 8` threads.
+6. After ending the pass and inserting a barrier, `submitAndWait()` submits and waits for the
+   graphics queue. Only then does `Film::addSamples(2)` advance the CPU count to 10.
+
+Every compute batch currently includes a CPU wait. Multiple sampling batches are not kept
+asynchronously in flight.
+
+**GPU pixel work.**
+
+`traceMain()` rejects threads outside the image extent, then obtains the pixel's accumulation.
+For each sample it seeds the RNG from pixel, sample index and seed, jitters the location within
+the pixel, generates a ray from the camera basis and calls tracePath.
+It adds `float4(radiance, 1)` for each sample and writes the pixel once after the batch loop.
+
+For the per-sample bounce loop and shading algorithms, continue to [light transport](reference/light-transport.md).
+
+The CPU Film counter schedules the next batch; each GPU pixel's `.w` records its actual count.
+`saveImages()` checks that the GPU counts agree with the CPU count when exporting.
+
+### Presentation and file output
+
+| Output | GPU work | CPU work |
+| --- | --- | --- |
+| GUI window | `Session::present()` draws a fullscreen triangle, reading, scaling and tone mapping accumulation into the swapchain image | Draw UI, then call `Window::present()`; regular display does not read the full image back |
+| Headless files | `Session::readback()` dispatches `tonemapMain` into Film's display buffer | `Film::readback()` reads accumulation and display; `saveImages()` writes PNG and HDR |
+
+Both paths use `tonemapCore` for exposure and Reinhard mapping.
+The GUI relies on hardware encoding for sRGB swapchain targets, and presentFS explicitly encodes
+other target formats. Current `tonemapMain` only writes tone-mapped values into display;
+`saveImages()` quantizes them directly to PNG bytes without adding sRGB encoding.
+Sharing tone mapping therefore does not imply identical window and PNG encoding.
+HDR comes from averaged linear accumulation, without display exposure or tone mapping.
+
+Headless rendering writes both the requested `.png` and a `.hdr` with the same basename.
+The GUI does not save files on exit. `RenderResult` owns the CPU copies used for file output;
+the headless renderer releases its Session before calling `saveImages()`.
+
+For display-pipeline and window implementation details, see [presentation](reference/presentation.md).
+
+## State changes and resource lifetime
+
+### Ownership and lifetime
+
+| Resource | Owner or holder | Lifetime contract |
+| --- | --- | --- |
+| `DeviceContext` | Headless call or GUI loop | Outlives its shader libraries, sessions, films and window resources |
+| `ShaderLibrary` | Headless renderer scope or GUI loop | Outlives sessions that borrow it; sessions also retain their pipelines |
+| `Scene` | Import caller; a worker prepares GUI replacements | GpuScene retains no input Scene reference after upload |
+| `GpuScene` | Shared by sessions through `shared_ptr` | Remains alive while any session holds it; resources belong to this snapshot |
+| `Film` | One Session | Accumulation / display buffers are replaced on resize and released with the Film |
+| `RenderResult` | Readback caller | Owns CPU vectors independent of subsequent rendering and GPU resource lifetime |
+
+Interactive mode creates a `RasterSession` first. The first switch to Path tracing creates a
+`PathSession` through `Session(shaders, source)`, sharing the GpuScene while allocating its own
+Film. Switching renderers therefore reuses geometry, textures and acceleration structures without
+mixing the two renderers' pixel results. **Raster also needs the TLAS**: fragment shaders use ray
+queries for shadows and transmission preview.
+
+### What invalidates accumulated samples
+
+Samples can be combined only while scene, camera, image size, integrator and other relevant
+conditions remain compatible.
+
+| Operation | GPU scene snapshot | Path-tracing Film |
+| --- | --- | --- |
+| Change camera | Retained | Reset when the value changes |
+| Change image size | Retained | Reallocate buffers and reset when the size changes |
+| Change integrator or environment | Retained | Reset when the value changes |
+| Change exposure | Retained | Preserve samples; update display |
+| Raise target SPP / change batch SPP | Retained | Preserve samples and continue |
+| Lower target SPP | Retained | Reset only if the new target is below the accumulated count |
+| Click Restart | Retained | Reset |
+| Switch GUI renderer | Shared snapshot | Separate films; current camera, size and settings determine whether the cached path film can continue |
+| Successfully import another model in the GUI | Build a replacement snapshot | Replace RasterSession and discard the old PathSession |
+| Call `PathSession::setScene()` | Build a new snapshot for this session | Reset; other sessions retain their original snapshot |
+
+**Reset currently only sets the CPU sample count to zero; it does not immediately clear GPU buffers.**
+On the next batch, `Params.image.z == 0` makes traceMain initialize its local sum to zero and
+overwrite each pixel. Other batches read the previous accumulation.
+If no rendering follows a reset, the old bytes remain in the buffer.
+
+Even when paused, the GUI computes one fresh batch after reset so the displayed image matches
+the current state. These rules live in the
+[Session / PathSession setters](../src/render/session.cpp),
+[Film::reset](../src/render/film.h), [traceMain](../shaders/pathtracer.slang)
+and [interactive loop](../src/render/renderer.cpp).
+
+### Switching renderers
+
+Only the active GUI session receives the current camera, resolution and controls. On returning to
+a cached PathSession, setters compare those values with its retained state. An unchanged round
+trip resumes the existing accumulation (or remains complete if its target was reached). A changed
+camera, resolution or integrator resets it on return. Exposure changes preserve samples.
+
+### Replacing a scene
+
+During GUI model import, CPU parsing and texture decoding run on a worker. GPU resource creation
+stays on the rendering thread. Only after a replacement RasterSession has been built and the queue
+has been waited on does the application replace the old session and discard the old PathSession.
+A failed import preserves the working scene and camera.
+
+### Window resources
+
+Dear ImGui's detached panels each have a GLFW window and a slang-rhi surface. Release the native
+surface before destroying its GLFW window. Platform windows continue updating while the main
+surface is minimized; the GUI loop waits on the queue before shutdown. Window fitting and callback
+implementation details are in the [presentation reference](reference/presentation.md).
+
+## Code map and further reading
+
+Use this map to locate the implementation after following the execution above.
 
 | Implementation | Responsibility |
 | --- | --- |
@@ -37,350 +280,15 @@ Build, usage and verification commands live in the [project README](../README.md
 | [scene_io.h.slang](../shaders/scene_io.h.slang) | Shared host/device records |
 | [Dependencies.cmake](../cmake/Dependencies.cmake) | Local dependency integration |
 
-ShaderLibrary caches modules and pipelines. Graphics pipelines are keyed by entry-point pair and
-variant name, so opaque, masked and blended raster states can share entry points.
+### Topic references
 
-## Scene representation
-
-`Scene` ([scene.h](../src/scene/scene.h)) is the entire CPU-side model. Geometry is stored as
-**typed arrays in structure-of-arrays form**, not as per-triangle records:
-
-| Field | Meaning |
+| Task | Read next |
 | --- | --- |
-| `positions`, `normals` | One `vec3` per vertex. `normals` is zero when the source had no usable normal. |
-| `baseColorUvs`, `metallicRoughnessUvs`, `normalUvs`, `occlusionUvs`, `emissiveUvs`, `transmissionUvs` | One `vec2` per vertex, one array per material texture slot because every slot may use a different UV set. |
-| `indices` | One `uvec3` per triangle. The ids are **local to the owning primitive's vertex window**. |
-| `primitives` | `Primitive` records: one triangle range with a single material. |
-| `instances` | `Instance` records: a transform plus the primitive it places. |
-| `materials`, `lights` | `GltfMaterial` and world-space `Light` records. |
-| `triangleLights`, `lightCdf` | Per-triangle light remap and the light power distribution; see [light sampling](#light-sampling). |
-| `textures`, `samplers` | `TextureData` (full mip chain, RGBA8) and `TextureSampler` states. |
-| `eye`, `target`, `up`, `fov`, `environment`, `lower`, `upper` | Camera and derived extents. |
-| `errors`, `warnings`, `currentScene` | Diagnostics and provenance. |
-
-**Per-primitive vertex window.** `buildPrimitive` appends each primitive's referenced vertices as one
-contiguous run and rewrites the indices relative to that run. Within a primitive a shared vertex is
-stored once (the run is compacted to only the vertices actually referenced), so `positions.size()` is
-far below `3 * triangleCount` for indexed meshes. `Primitive::vertexBase`/`vertexCount` record the
-window; `Primitive::firstTriangle` is an ordinal into `indices`.
-
-The window is not just bookkeeping — it is required. The acceleration-structure backend derives a
-primitive's triangle count from its vertex and index counts
-(see [AS constraints](#acceleration-structures)), so a primitive must not reference vertices outside
-its own triangles.
-
-**Transforms.** `addInstance` stores three explicit object-to-world rows and three inverse-transpose
-rows for normals, avoiding dependence on host and shader matrix storage conventions.
-
-**Texture and sampler dedup.** `importMaterials` registers one `TextureData` per image/color-space
-pair (with its full mip chain) and one `TextureSampler` per distinct wrap/filter state. The same image
-used as both sRGB color and linear data gets separate texture entries. Materials name both by index, so
-the shader's bindless arrays are filled in exactly the order the importer registered them.
-
-## Host/device contract
-
-[scene_io.h.slang](../shaders/scene_io.h.slang) is included by both the C++ and the Slang side, so
-the two definitions cannot drift and each size is asserted in one place (Slang has no `sizeof`
-type operand, so the assertions are host-only; the shared definition is what keeps layouts equal).
-
-| Struct | Size | Role |
-| --- | --- | --- |
-| `Primitive` | 20 B | `firstTriangle`, `triangleCount`, `material`, `vertexBase`, `vertexCount` |
-| `Instance` | 112 B | Object-to-world rows, normal rows, `primitive`, `material`, `lightBase`, `flags` |
-| `Light` | 96 B | Triangle vertices and material/UVs, or point position/intensity; `info.y` identifies the type |
-| `GltfMaterial` | 160 B | PBR/volume factors, flags, texture/sampler indices, normal/occlusion scales, and attenuation parameters |
-| `Params` | 112 B | Per-dispatch constants (image, integrator, camera basis, environment) |
-| `RasterParams` | 112 B | Raster constants: view-projection rows, eye + `tan(fov/2)`, environment + eye-to-target distance, total light count + debug view + triangle light count |
-
-Not shared are the vertex attributes. Positions, normals, UVs and indices are each bound as their
-own typed array (`StructuredBuffer<float3>`, `<float2>`, `<uint3>`), which is what lets the elements
-keep their tight glTF sizes instead of being padded to `float4` — the padding was only ever needed to
-make a `float3` struct member unambiguous.
-
-`SNR_MAX_TEXTURES` (1024) and `SNR_MAX_SAMPLERS` (32) live here too. The host sizes its bindless
-descriptor pool from these constants, so the shader's handle-array bounds and the pool capacity
-cannot disagree.
-
-Params packing ([session.cpp](../src/render/session.cpp)):
-
-| Field | Contents |
-| --- | --- |
-| `image` | width, height, accumulated sample base, batch sample count |
-| `integrator` | max bounces, RNG seed, light count, NEE enabled |
-| `eye` | camera position, and `tan(fov/2)` in `.w` |
-| `forward` | normalized view direction, aspect ratio in `.w` |
-| `right`, `up` | orthonormal camera basis |
-| `environment` | constant environment radiance; `.w` is zero for tracing and exposure for tone-map readback |
-
-## GPU resource details
-
-### Geometry buffers
-
-`positions` and `indices` are uploaded once with
-`BufferUsage::ShaderResource | BufferUsage::AccelerationStructureBuildInput`.
-All other scene buffers use `ShaderResource`.
-
-### Textures and samplers
-
-Each `TextureData` becomes one `ITexture` with its full mip chain (RGBA8, sRGB variant when the
-image is a colour texture), an `ITextureView`, and a descriptor handle pulled from the view. Each
-`TextureSampler` becomes one `ISampler` with a matching handle. The handles are written into the
-shader's bindless `images[]`/`samplers[]` arrays at the index the material names. The `ITexture`,
-`ITextureView` and `ISampler` objects are retained for the renderer's lifetime, because the
-descriptor handle is owned by them.
-
-### Acceleration structures
-
-One **BLAS per primitive**, built from indexed triangles over the primitive's own vertex window:
-vertex format `RGB32Float`, stride 12, vertex data offset to `vertexBase * 12`, index data offset to
-`firstTriangle * 3 * 4`, `vertexCount = primitive.vertexCount`, `indexCount = triangleCount * 3`.
-Every BLAS build shares one encoder and one submit; each keeps its own scratch buffer.
-
-One **TLAS** references every instance: the instance descriptors carry the transform, an `instanceID`
-used as the shader's hit lookup, the instance mask, and the corresponding BLAS handle.
-
-> The slang-rhi Vulkan backend computes a geometry's primitive count as
-> `max(vertexCount, indexCount) / 3` and `maxVertex = vertexCount - 1`. A primitive must therefore
-> satisfy `vertexCount <= 3 * triangleCount`, which is exactly what the per-primitive vertex window
-> guarantees. Describing a primitive with the global vertex count would make the backend read the
-> index buffer out of range.
-
-### Binding
-
-`GpuScene::bind()` distinguishes the two binding models:
-
-- **Buffers** (`sceneBVH`, `positions`, `normals`, `baseColorUvs`, `metallicRoughnessUvs`,
-  `normalUvs`, `occlusionUvs`, `emissiveUvs`, `transmissionUvs`, `indices`, `primitives`, `instances`, `materials`,
-  `lights`, `triangleLights`, `lightCdf`) are bound by **name** into descriptor set 0.
-- **Textures and samplers** are written into their **bindless slots** by `setDescriptorHandle`, one
-  per registered image/sampler.
-
-`GpuScene::bindRaster()` binds the same buffers **except** `triangleLights`, which the raster program
-never declares. `sceneBVH` *is* bound: the fragment shader's shadow rays are inline queries against the
-same top-level structure the path tracer uses. `GpuScene` also exposes one `InstanceDraw` per instance
-for the [raster draw loop](#pass-and-draw-loop) — the primitive and its triangle count (which together give the draw's vertex
-count), whether the instance's material is glTF BLEND (which picks the draw's group), and the
-instance's world origin (which orders the transparent group).
-
-
-The shared material header accepts the including module's bindless arrays as function parameters.
-The tone-map header reads the including module's `film`, `display` and `params` declarations.
-Neither header declares independent bindings.
-
-## Shading details
-
-The [path loop](rendering-flow.md#3-one-path-inside-a-gpu-thread) owns execution order.
-This section records the material, visibility and sampling details used by that loop.
-
-### Materials and BSDF
-
-`materialAt` produces a `SurfaceMaterial` (base color, emission, metallic, roughness, occlusion) by
-multiplying the glTF factors with the matching textures. The model is metallic-roughness:
-
-- Dielectric diffuse, reflection and transmission lobes are selected per hit; metals retain reflection.
-- Specular uses a GGX distribution with VNDF sampling and height-correlated Smith visibility, and
-  Schlick Fresnel.
-- Sub-milliperceptual roughness is treated as a **delta** mirror lobe. Its delta sample flag prevents
-  applying continuous-density emitter-hit MIS to the next hit.
-- A material without the PBR flag falls back to diffuse-only (`material.flags.y`).
-
-**Emission and occlusion.** Emission is `emissiveFactor * emissiveTexture`, and the same expression
-is what `lightEmission` returns for a sampled light point, so a directly hit emitter and a sampled
-one agree for MIS. The occlusion map's red channel, lerped by `occlusionStrength`, scales only the
-diffuse lobe; the specular lobe is left alone.
-
-**Normal mapping.** A ray-traced hit has no screen-space derivatives, so the tangent frame comes from
-Mikkelsen's derivative-free construction: `dP/du` and `dP/dv` are taken from the triangle's
-world-space edges and its normal-map UVs, orthogonalised against the interpolated shading normal, and
-the sampled tangent-space normal perturbs that normal. Degenerate UVs leave the interpolated normal
-unchanged, and a perturbed normal that tilts past the surface plane is flipped back toward the
-geometry.
-
-**Texture LOD.** Ray tracing has no screen-space derivatives, so `Sample()`'s implicit LOD cannot
-pick a mip. Instead the ray-cone footprint at the hit is converted to texture space with the
-triangle's texel density (UV area per world area) and passed to `SampleGrad` as an isotropic
-gradient. The footprint widens on grazing surfaces, which is what keeps those lookups from aliasing.
-
-### Traversal and hit resolution
-
-`traceScene` runs an inline RayQuery that skips procedural primitives. Candidate triangles pass
-through `acceptSurfaceHit` for alpha and facing rules; volume entry and exit boundaries remain
-traceable regardless of the material's double-sided flag. A committed hit carries distance,
-instance ID, local triangle index and barycentrics. Mirrored-instance facing uses world-space
-normals derived from transformed edges.
-
-### Light sampling
-
-Emissive geometry is flattened into world-space `Light` triangles during `finalize`, each carrying
-its material index and its emissive UVs so a textured emitter can be read at the sampled point. Each instance owns a run in `triangleLights`,
-with a light index or -1 for every local triangle. A hit resolves its light as
-`triangleLights[instance.lightBase + localTriangle]`. Two things keep the list balanced:
-
-- **Pruning.** A triangle whose emissive texture is black at its centroid is not added to the list.
-  It still emits when a BSDF sample hits it (the emission term is unchanged); it is simply not a NEE
-  target, so a mostly-black emissive map does not bury the real lights.
-- **Power weighting.** Each light is weighted by its emitted radiance times its world-space area, and
-  `lightCdf` is the prefix sum. `lightIndexFromCdf` draws a uniform value and reads the light off the
-  interval it lands in, so a bright light is sampled more often than a dim one. `lightPdf` scales the
-  uniform-on-the-triangle density by that selection probability, and `triangleLights` maps
-  a hit back to its light so a directly hit emitter is weighted by exactly the same density.
-
-Analytic `Scene::pointLights` are appended after the triangle prefix during `finalize()`. They have
-no geometry and store position in `Light::p0.xyz`, radiant intensity in `p1.rgb`, and `lightTypePoint`
-in `info.y`. Their CDF weights are proportional to `4 * luminance(intensity)` (the common pi factor
-is omitted from both triangle and point power weights). NEE uses the discrete light-selection
-probability, inverse-square falloff, and MIS weight 1: a BSDF sample cannot hit a zero-area point.
-Point lights require NEE; disabling NEE leaves environment and emissive geometry contributions.
-
-The studio rig creates a floor and one point light at the former area emitter's center. Its intensity
-is the former radiance times quad area, `36 * radius^2`, to preserve the far-field intensity along
-the old emitter's normal and keep brightness comparable across model scales. Shadows are hard.
-
-### Sampling utilities
-
-`hash32` builds the per-sample RNG state from pixel, sample index and seed; `randomFloat` is a
-small counter-based PRNG. `offsetRay` nudges ray origins off the surface to avoid self-intersection.
-
-## Raster implementation
-
-The preview uses one forward pass with no G-buffer. Its host implementation is
-[rasterizer.cpp](../src/render/rasterizer.cpp), with the shader entries listed in the code map.
-
-### Pass and draw loop
-
-`render()` records one render pass with two colour targets — an RGBA32Float colour target (cleared to
-the scene's environment radiance, so pixels the geometry misses match the path tracer's miss radiance)
-and an R32Uint object-id target — plus a D32Float depth target. The depth test is **reversed-Z**
-(`clip.z` is the constant near plane and `clip.w` the view depth, so stored depth is `near / viewZ`)
-with `ComparisonFunc::Greater`, which keeps float precision uniform and needs no far plane. Culling is
-off, matching the path tracer's lack of culling.
-
-Three pipelines share `rasterVS` and the `shadeRasterPixel` helper.
-`ShaderLibrary::renderPipeline` is keyed by the entry-point pair **and** a variant name:
-
-- the **opaque** pipeline uses `rasterOpaqueFS` with `[earlydepthstencil]`, so depth-hidden fragments
-  skip material evaluation, transmission traversal and all 32 light samples;
-- the **mask** pipeline uses `rasterFS` with normal depth writes, so alpha-discarded fragments leave
-  depth untouched. OPAQUE and MASK draws retain their original scene order;
-- the **blend** pipeline draws the BLEND instances after them, with source-over blending
-  (`SrcAlpha`/`InvSrcAlpha`) and depth writes off, and with the alpha channel's blend factors pinned
-  to `Zero`/`One` so the colour target's alpha — the Film's per-pixel sample counter — keeps the value the
-  clear left instead of accumulating coverage.
-
-One draw is issued per instance — `DrawArguments{vertexCount = triangleCount * 3, instanceCount = 1,
-startInstanceLocation = instanceIndex}` — with no vertex or index buffer bound. The instance index
-reaches the vertex shader through `SV_StartInstanceLocation` (`SV_InstanceID` reports
-`instanceID - baseInstance` under D3D semantics and carries nothing usable here).
-
-Opaque/MASK and BLEND draws are recorded into the same pass, so the transparent group tests against the depth the
-opaque group wrote with no second pass and no depth copy. Shading BLEND later than everything else is
-what makes sorting enough: OPAQUE/MASK draws keep scene order, switching pipelines as needed.
-BLEND draws follow in back-to-front order by squared camera distance to each instance origin.
-Binding a pipeline replaces the root object, so constants, scene arrays and viewport are set
-for every pipeline binding. Sorting whole instances rather than triangles is the approximation a preview can
-afford, and `std::stable_sort` keeps scene order for equal distances.
-
-### Vertex pulling
-
-`rasterVS` reads `SV_VertexID` and derives `triangle = vertexId / 3`, `corner = vertexId % 3`, then
-addresses `indices[primitive.firstTriangle + triangle] + primitive.vertexBase`. Because each
-primitive owns a contiguous vertex window, this resolves a corner with no index buffer, no
-vertex-buffer usage change, and no second copy of position data — the [shared geometry contract](#hostdevice-contract) holds.
-The vertex is transformed by `RasterParams.viewProjRows` and handed on as `SV_Position`, with the
-world position and the instance index passed through as varyings. The projection rows reproduce the
-path tracer's ray basis, so the two renderers frame a model identically.
-
-### Fragment shading
-
-`rasterFS` uses `SV_PrimitiveID` and `SV_Barycentrics` to pull the triangle's normal/UV corners and
-interpolate them, then calls the **shared** `surfaceAt` from
-[material_eval.h.slang](../shaders/material_eval.h.slang) — the same material evaluation the path
-tracer uses, so base color, metallic-roughness, normal mapping and occlusion cannot diverge between
-the two. The one difference is the texture fetch: `material_eval.h.slang` is compiled with
-`RASTER_PIPELINE` defined, which selects implicit-LOD `Sample()` (a fragment shader has valid
-derivatives) instead of the ray tracer's explicit-gradient `SampleGrad`.
-
-Shading combines three terms:
-
-- emissive term from the material;
-- an environment-radiance ambient term scaled by occlusion (diffuse for dielectrics, tinted by base
-  color for metals);
-- sampled direct lighting.
-
-Raster samples only the triangle prefix of the light CDF for its 32 area-light samples, normalizing
-selection probabilities against that prefix's total power. Point lights are evaluated separately,
-once each per shaded surface, with inverse-square falloff and one binary shadow ray. This also
-applies to secondary surfaces reached by the transmission preview. No shadow-map pass is needed.
-
-The occlusion test is an inline `RayQuery` in the fragment shader, traced against the same top-level
-acceleration structure the path tracer uses, which the raster root signature binds alongside the
-geometry buffers. Both endpoints are biased with `offsetRay` exactly as the NEE ray is, so neither the
-receiver nor the emitter self-intersects. Raster shadows retain binary triangle visibility, including
-for transparent materials. The query forces opaque triangle traversal and accepts the first blocker,
-avoiding shader candidate handling and a closest-hit search. These flags are limited to raster shadow
-queries; transmission and path-tracer queries keep their material-aware traversal.
-The environment term stays unshadowed: a constant
-environment has no direction to trace toward.
-
-`rasterFS` reads glTF `alphaMode` from `GltfMaterial::flags.z`. MASK discards fragments below
-`alphaCutoff`; OPAQUE ignores coverage; BLEND returns opacity for the
-[blend pipeline](#pass-and-draw-loop).
-
-Every fragment also writes `SV_Target1`, the one-based instance index, so the object-id target records
-which instance is under each pixel for picking or segmentation; unwritten pixels keep the zero the
-clear left, which is outside the instance range. The two outputs are declared as one struct with
-explicit `SV_Target0`/`SV_Target1` members: a return value plus an `out` parameter gets its locations
-assigned in the opposite order, which silently writes the id into the colour target.
-
-`RasterParams::counts.y` selects a `rasterDebug*` view via `RasterSession::setDebugView()`.
-Debug data is linear view depth normalized by eye-to-target distance, a stable hue per object ID,
-base color, or the shading normal mapped to `[0, 1]`. Debug views clear uncovered pixels to black
-instead of environment radiance and still pass through the shared tone map. These channels are
-only available in raster mode; controls are listed under [usage](../README.md#interactive-controls).
-
-### Transfer into Film
-
-`copyTextureToBuffer` transfers the linear color target into Film accumulation as one sample.
-This requires `CopySource` on the texture and `CopyDestination` on the accumulation buffer.
-Subsequent [window presentation or file export](rendering-flow.md#two-output-paths) uses the shared output paths.
-
-## Presentation implementation
-
-`Session::present()` loads present.slang lazily and caches a graphics pipeline for the swapchain format.
-`PresentParams::image.xy` holds film dimensions and `.zw` output dimensions.
-Bilinear sampling fits the linear film with preserved aspect ratio and black bars.
-See [output encoding](rendering-flow.md#two-output-paths) for how the target format affects the shader.
-
-Window resize requests convert framebuffer pixels to GLFW screen coordinates before the next event
-pump reconfigures the surface. Render resolution and window dimensions can therefore differ.
-
-Dear ImGui's docking release uses `ImGuiPlatformIO` callbacks to manage each detached panel's GLFW
-window and slang-rhi surface. Draw data uses the viewport's display origin and framebuffer scale.
-Release the native surface before its GLFW window. Platform windows continue updating when the
-main surface is minimized. For panel operations and controls, see [usage](../README.md#interactive-controls).
-
-## Transmission and volume transport
-
-The importer supports `KHR_materials_transmission`, `KHR_materials_volume` and `KHR_materials_ior`.
-GltfMaterial stores transmission, IOR, thickness classification, attenuation color/distance and texture
-metadata in the shared layout. Transmission reads the linear red channel using its own UV stream.
-The default IOR is 1.5; omitted attenuation distance means no absorption.
-
-A nonzero thicknessFactor classifies a closed volume. Thin sheets use a mirrored-hemisphere
-transmission lobe without macroscopic refraction. The rough BTDF uses GGX visible-normal sampling,
-the refractive Jacobian and a radiance eta-squared factor; it supports Fresnel reflection and total
-internal reflection. Transmission and diffuse share the dielectric layer beneath reflection.
-Metals only reflect.
-
-medium.slang tracks up to 16 nested homogeneous volumes. Absorption is
-`exp(-sigma_a * worldSpaceDistance)`; only transmitted boundary crossings update the medium stack.
-Both ray-based renderers preserve thicknessTexture metadata for inspection but ignore its baked
-distance when transporting light. Volume meshes must be closed with consistent outward winding.
-Entry and exit faces remain traceable even when doubleSided is false. Neither extension adds
-participating-medium scattering.
-
-Raster follows at most 12 transmission boundaries, shades reached surfaces with direct/ambient light,
-uses fixed pixel-seeded roughness samples and explicit secondary-ray texture LOD. Binary shadows,
-missing full reflection paths and no refractive caustic solver limit it to a preview.
-For glass reference images use path tracing with sufficient samples. Regression checks and commands
-are documented under [verification](../README.md#verification).
+| Change import or CPU scene representation | [Scene data](reference/scene-data.md) |
+| Change shared records, uploads, AS builds or bindings | [GPU resources and host/device contracts](reference/gpu-resources.md) |
+| Change material fields end to end | [Scene data](reference/scene-data.md), [shared layouts](reference/gpu-resources.md#hostdevice-contract), then [light transport](reference/light-transport.md) |
+| Understand one path or change BSDF / light sampling / media | [Light transport](reference/light-transport.md) |
+| Change Raster pipeline state or fragment shading | [Rasterizer implementation](reference/rasterizer.md) |
+| Change display fitting, swapchain integration or detached panels | [Presentation implementation](reference/presentation.md) |
+| Test renderer changes | [Renderer tests](../tests/README.md) |
+| Maintain the diagrams | [Diagram sources and regeneration](diagrams/README.md) |

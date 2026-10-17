@@ -10,10 +10,18 @@ a PyTorch dependency. See the [roadmap](#roadmap).
 
 ## Documentation
 
+New to the project? [Build and run it](#building), then read the
+[architecture](docs/architecture.md) from the system overview through scene preparation,
+rendering, output and state changes. Follow its topic links when you need implementation details.
+
 | Need | Read |
 | --- | --- |
-| Understand ownership, CPU/GPU execution, path tracing and accumulation resets | [Illustrated rendering flow](docs/rendering-flow.md) |
-| Look up code locations, layouts, bindings and shading details | [Architecture reference](docs/architecture.md) |
+| Understand the system and follow a scene to an image | [Architecture](docs/architecture.md) |
+| Change scene import or CPU representation | [Scene data](docs/reference/scene-data.md) |
+| Change shared layouts, GPU resources or bindings | [GPU resources](docs/reference/gpu-resources.md) |
+| Understand path tracing, materials, sampling or volumes | [Light transport](docs/reference/light-transport.md) |
+| Change Raster or window presentation | [Rasterizer](docs/reference/rasterizer.md) / [Presentation](docs/reference/presentation.md) |
+| Test renderer changes | [Renderer tests](tests/README.md) |
 | Modify the project with an AI agent | [Repository rules and workflow](AGENTS.md) |
 
 ## Status
@@ -23,7 +31,7 @@ a PyTorch dependency. See the [roadmap](#roadmap).
 | Scene import | glTF 2.0 (`.gltf` / `.glb`), instancing, PBR textures, per-slot UV transforms and alpha modes |
 | Path tracing | Progressive hardware ray queries, NEE, MIS, reflection and transmission |
 | Raster preview | Single-pass forward shading, direct-light shadows and debug views |
-| Materials | Transmission, volume absorption and IOR extensions; [semantics and limits](docs/architecture.md#transmission-and-volume-transport) |
+| Materials | Transmission, volume absorption and IOR extensions; [semantics and limits](docs/reference/light-transport.md#transmission-and-volume-transport) |
 | Utilities | Optional studio floor / point light (`--studio`), tone-mapped PNG and linear HDR output |
 | Neural rendering | Planned; see the [roadmap](#roadmap) |
 
@@ -78,6 +86,8 @@ snr --list-models
 snr --model DamagedHelmet --inspect
 ```
 
+For GUI, PNG and HDR encoding differences, see [presentation and file output](docs/architecture.md#presentation-and-file-output).
+
 ### Interactive controls
 
 - **Import glTF / GLB** opens a file browser with path entry, filename filtering and folder navigation.
@@ -86,7 +96,7 @@ snr --model DamagedHelmet --inspect
 - **Add studio floor and point light** applies to the next import. `--studio` initializes it.
 - **Renderer** selects Raster or Path tracing. Path controls expose target SPP, SPP per frame, bounce
   count, direct-light sampling, pause and restart. Exposure applies to both renderers.
-  [Accumulation rules](docs/rendering-flow.md#4-what-invalidates-accumulated-samples) explain which changes restart sampling.
+  [Accumulation rules](docs/architecture.md#what-invalidates-accumulated-samples) explain which changes restart sampling.
 - Left drag orbits, right drag pans, and the wheel changes eye-to-target distance.
   ImGui-captured input does not move the camera. Keys **1–5** select raster shaded, depth,
   object-id, base-color and normal views.
@@ -116,28 +126,11 @@ snr --model DamagedHelmet --inspect
 | `--raster` | Preview with the forward rasterizer instead of path tracing |
 | `--window` | Interactive GUI with glTF import, Raster / Path tracing selection, sampling controls and XYZ axes |
 | `--no-nee` | Disable next-event estimation |
+| `--output PATH.png` | Headless PNG output path; also writes a linear HDR file with the same basename |
 | `--shader-dir PATH` | Override the shader source directory |
 | `--validate` | Enable RHI and Vulkan validation |
 | `--inspect` | Print the derived scene as JSON and exit, without a GPU device |
 | `--help` | Print the option list |
-
-## Verification
-
-After [building](#building), smoke-test changed shaders at runtime; C++ compilation alone does not
-compile the shader entry points. These commands require a supported GPU and the sample-assets submodule:
-
-```sh
-build/snr.exe --model DamagedHelmet --studio --width 64 --height 64 --spp 8 --batch-size 4 --validate --output output/path-check.png
-build/snr.exe --model DamagedHelmet --studio --raster --width 64 --height 64 --validate --output output/raster-check.png
-```
-
-For transmission / volume changes, run the generated-fixture integration checks. They require a GPU
-but no external scene assets, and check absorption, nested media, IOR, TIR, texture sampling,
-refraction displacement and energy conservation using linear HDR output:
-
-```sh
-python tests/test_transmission.py --exe build/snr.exe
-```
 
 ## Roadmap
 
