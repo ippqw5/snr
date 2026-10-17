@@ -55,7 +55,7 @@ private:
     // Every material texture slot picks its own UV set and transform.
     struct MaterialBindings
     {
-        TextureCoordinates baseColor, metallicRoughness, normal, occlusion, emissive;
+        TextureCoordinates baseColor, metallicRoughness, normal, occlusion, emissive, transmission;
     };
 
     // A strided view over the bytes an accessor reads.
@@ -99,10 +99,10 @@ private:
     // Registers `imageIndex` as an RGBA8 texture with a full mip chain and returns its index, or -1
     // when it cannot be used. The same image imported once as sRGB and once as linear data yields two
     // entries, because the two need different texture formats.
-    int  textureFor(int imageIndex, bool srgb);
+    int textureFor(int imageIndex, bool srgb);
     // Registers `sampler` and returns its index, sharing one entry across identical states.
-    int  samplerFor(const TextureSampler& sampler);
-    int  imageOf(const tinygltf::Texture& texture);
+    int samplerFor(const TextureSampler& sampler);
+    int imageOf(const tinygltf::Texture& texture);
 
     // Accessors
     bool readAttribute(int accessorIndex, int type, std::vector<float>& values);
@@ -124,13 +124,13 @@ private:
     // The glTF model the importer was loaded from, kept so that derive() can run again.
     std::shared_ptr<tinygltf::Model> m_model;
 
-    std::vector<std::string>                 m_ignored;
-    std::vector<MaterialBindings>            m_bindings;
-    std::vector<uint32_t>                    m_materialIds;
-    std::unordered_map<uint64_t, int>        m_textureBlocks;
-    std::unordered_map<uint64_t, uint32_t>   m_primitiveCache;
-    MaterialBindings                         m_defaultBindings;
-    uint32_t                                 m_defaultMaterial = 0;
-    size_t                                   m_degenerateTriangles = 0;
+    std::vector<std::string>               m_ignored;
+    std::vector<MaterialBindings>          m_bindings;
+    std::vector<uint32_t>                  m_materialIds;
+    std::unordered_map<uint64_t, int>      m_textureBlocks;
+    std::unordered_map<uint64_t, uint32_t> m_primitiveCache;
+    MaterialBindings                       m_defaultBindings;
+    uint32_t                               m_defaultMaterial = 0;
+    size_t                                 m_degenerateTriangles = 0;
 };
 } // namespace snr

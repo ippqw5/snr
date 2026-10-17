@@ -21,15 +21,7 @@ namespace
 // matters because the preview does not know how far away the scene extends.
 constexpr float kNear = 0.01f;
 
-// A swapchain image is commonly an sRGB format, and writing to one applies the encode in hardware, so
-// the present shader must leave linear values rather than encoding twice.
-bool isSrgbFormat(Format format)
-{
-    return format == Format::RGBA8UnormSrgb || format == Format::BGRA8UnormSrgb ||
-           format == Format::BGRX8UnormSrgb;
-}
-
-RasterParams makeRasterParams(const RenderSettings& settings, glm::vec3 environment, uint32_t lightCount)
+RasterParams makeRasterParams(const RenderSettings& settings, glm::vec3 environment, uint32_t lightCount, uint32_t triangleLightCount)
 {
     const auto& camera = settings.camera;
     glm::vec3   forward = glm::normalize(camera.target - camera.eye);
@@ -51,14 +43,16 @@ RasterParams makeRasterParams(const RenderSettings& settings, glm::vec3 environm
     // The distance to the orbit target is the one scale a preview always has, so the depth debug view
     // normalises by it and the target sits mid grey.
     params.environment = glm::vec4(environment, glm::length(camera.target - camera.eye));
-    params.counts = glm::uvec4(lightCount, settings.debugView, 0, 0);
+    params.counts = glm::uvec4(lightCount, settings.debugView, triangleLightCount, 0);
     return params;
 }
 } // namespace
 
-RasterSession::RasterSession(ShaderLibrary& shaders, const Scene& scene, const RenderSettings& settings)
-    : Session(shaders, scene, settings)
+RasterSession::RasterSession(ShaderLibrary& shaders, const Scene& scene, const RenderSettings& settings, const UploadProgress& progress)
+    : Session(shaders, scene, settings, progress)
 {
+    if (progress)
+        progress(0.98f, "Preparing preview pipeline and render targets");
     // Target 0 is the shaded image; target 1 is the instance under each pixel, written as an integer
     // so a picking or segmentation pass can read it back without decoding a colour.
     ColorTargetDesc targets[2] = {};
@@ -77,6 +71,7 @@ RasterSession::RasterSession(ShaderLibrary& shaders, const Scene& scene, const R
     // draws both faces instead of guessing per material.
     desc.rasterizer.cullMode = CullMode::None;
     m_pipeline = shaders.renderPipeline("rasterVS", "rasterFS", desc);
+    m_opaquePipeline = shaders.renderPipeline("rasterVS", "rasterOpaqueFS", desc);
 
     // The BLEND group draws after that one, over the depth it left. It cannot write depth, or a
     // nearer transparent surface would hide the ones behind it that still have to blend through, and
@@ -96,6 +91,8 @@ RasterSession::RasterSession(ShaderLibrary& shaders, const Scene& scene, const R
     m_blendPipeline = shaders.renderPipeline("rasterVS", "rasterFS", blendDesc, "blend");
 
     createTargets(settings.imageSize);
+    if (progress)
+        progress(1.0f, "Ready");
 }
 
 void RasterSession::createTargets(ImageSize size)
@@ -149,7 +146,7 @@ void RasterSession::resize(ImageSize size)
 
 void RasterSession::render()
 {
-    RasterParams params = makeRasterParams(m_settings, m_environment, m_scene->lightCount());
+    RasterParams params = makeRasterParams(m_settings, m_environment, m_scene->lightCount(), m_scene->triangleLightCount());
 
     m_film.reset();
 
@@ -224,14 +221,24 @@ void RasterSession::render()
     };
 
     // Geometry first, so the transparent group has depth to test against.
-    bindGroup(m_pipeline);
+    bindGroup(m_opaquePipeline);
     std::vector<uint32_t> transparent;
+    bool                  maskedPipeline = false;
     for (uint32_t index = 0; index < uint32_t(draws.size()); ++index)
     {
         if (draws[index].blend)
             transparent.push_back(index);
         else
+        {
+            // Preserve draw order, but force early depth tests only for OPAQUE materials. MASK
+            // discards must happen before depth writes; BLEND continues to use its own pipeline.
+            if (draws[index].mask != maskedPipeline)
+            {
+                maskedPipeline = draws[index].mask;
+                bindGroup(maskedPipeline ? m_pipeline : m_opaquePipeline);
+            }
             drawInstance(index);
+        }
     }
 
     if (!transparent.empty())
@@ -272,72 +279,4 @@ void RasterSession::render()
     m_context.checkValidation();
 }
 
-void RasterSession::present(rhi::ITexture* target, const DisplaySettings& display)
-{
-    const Format format = target->getDesc().format;
-    if (!m_present || m_presentFormat != format)
-    {
-        ColorTargetDesc colorTarget = {};
-        colorTarget.format = format;
-
-        RenderPipelineDesc desc = {};
-        desc.targets = &colorTarget;
-        desc.targetCount = 1;
-        desc.primitiveTopology = PrimitiveTopology::TriangleList;
-        desc.rasterizer.cullMode = CullMode::None;
-        m_present = m_shaders.renderPipeline("presentVS", "presentFS", desc);
-        m_presentFormat = format;
-    }
-
-    if (m_settings.imageSize.width != target->getDesc().size.width ||
-        m_settings.imageSize.height != target->getDesc().size.height)
-    {
-        throw std::runtime_error("present target size does not match the session image size");
-    }
-
-    PresentParams params = {};
-    params.image = {m_settings.imageSize.width, m_settings.imageSize.height, 0, 0};
-    params.config = {display.exposure, isSrgbFormat(format) ? 1.0f : 0.0f, 0, 0};
-
-    auto encoder = m_context.createEncoder();
-    encoder->globalBarrier();
-
-    RenderPassColorAttachment color = {};
-    color.view = target->getDefaultView();
-    color.loadOp = LoadOp::Clear;
-    color.storeOp = StoreOp::Store;
-
-    RenderPassDesc passDesc = {};
-    passDesc.colorAttachments = &color;
-    passDesc.colorAttachmentCount = 1;
-
-    auto* pass = encoder->beginRenderPass(passDesc);
-    if (!pass)
-        throw std::runtime_error("begin present pass failed");
-    auto* root = pass->bindPipeline(m_present);
-    if (!root)
-        throw std::runtime_error("bind present pipeline failed");
-
-    ShaderCursor cursor(root);
-    bindConstants(cursor, "presentParams", &params, sizeof(params));
-    checkRhi(cursor["film"].setBinding(m_film.accumulation()), "bind present film");
-
-    RenderState state = {};
-    state.viewports[0] = Viewport::fromSize(m_settings.imageSize.width, m_settings.imageSize.height);
-    state.viewportCount = 1;
-    state.scissorRects[0] =
-        ScissorRect::fromSize(m_settings.imageSize.width, m_settings.imageSize.height);
-    state.scissorRectCount = 1;
-    pass->setRenderState(state);
-
-    // One fullscreen triangle covers the whole target; the shader derives the pixel from SV_Position.
-    DrawArguments arguments = {};
-    arguments.vertexCount = 3;
-    arguments.instanceCount = 1;
-    pass->draw(arguments);
-    pass->end();
-
-    m_context.submit(encoder);
-    m_context.checkValidation();
-}
 } // namespace snr

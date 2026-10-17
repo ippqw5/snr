@@ -12,6 +12,8 @@ snr_require_submodule(glm glm/glm.hpp)
 snr_require_submodule(stb stb_image.h)
 snr_require_submodule(slang-rhi CMakeLists.txt)
 snr_require_submodule(glfw CMakeLists.txt)
+snr_require_submodule(imgui imgui.h)
+snr_require_submodule(imgui backends/imgui_impl_glfw.cpp)
 
 if(NOT EXISTS "$ENV{VULKAN_SDK}/include/vulkan/vulkan.h")
     message(
@@ -134,3 +136,15 @@ endforeach()
 set(SLANG_RHI_ENABLE_VULKAN ON CACHE BOOL "" FORCE)
 set(FETCHCONTENT_SOURCE_DIR_VULKAN_HEADERS "$ENV{VULKAN_SDK}" CACHE STRING "" FORCE)
 add_subdirectory(external/slang-rhi EXCLUDE_FROM_ALL)
+
+# Dear ImGui comes from the pinned external/imgui submodule, like the other source dependencies.
+set(snr_imgui_dir "${PROJECT_SOURCE_DIR}/external/imgui")
+add_library(snr_imgui STATIC
+    ${snr_imgui_dir}/imgui.cpp
+    ${snr_imgui_dir}/imgui_draw.cpp
+    ${snr_imgui_dir}/imgui_tables.cpp
+    ${snr_imgui_dir}/imgui_widgets.cpp
+    ${snr_imgui_dir}/backends/imgui_impl_glfw.cpp
+)
+target_include_directories(snr_imgui PUBLIC ${snr_imgui_dir} ${snr_imgui_dir}/backends)
+target_link_libraries(snr_imgui PUBLIC glfw)

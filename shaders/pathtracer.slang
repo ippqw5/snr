@@ -1,6 +1,7 @@
 import sampling;
 import scene;
 import bsdf;
+import medium;
 
 // `film` and `display` are the Film buffers; tonemap.h.slang reads them along with `params`.
 RWStructuredBuffer<float4> film;
@@ -27,6 +28,8 @@ float3 tracePath(float3 origin, float3 direction, float pixelAngle, inout uint r
     float previousPdf = 0;
     bool previousUseNee = false;
     RayCone cone = {0, pixelAngle};
+    MediumState media = {};
+    float etaScale = 1;
 
     for (uint bounce = 0; bounce < params.integrator.x; ++bounce)
     {
@@ -50,6 +53,9 @@ float3 tracePath(float3 origin, float3 direction, float pixelAngle, inout uint r
         float3 position = surface.position;
         float3 ng = surface.geometricNormal;
         float3 normal = surface.normal;
+        float3 sigmaA = segmentAbsorption(media, surface.material, surface.frontFace);
+        throughput *= exp(-sigmaA * hit.t);
+        setMediumEta(surface.material, surface.frontFace, media, instance.material);
 
         uint lightCount = params.integrator.z;
         int hitLight = lightIndexOf(instance, hit.primitive);
@@ -66,55 +72,80 @@ float3 tracePath(float3 origin, float3 direction, float pixelAngle, inout uint r
 
         if (bounce == params.integrator.x)
             break;
-        bool useNee = params.integrator.w != 0 && params.integrator.z != 0;
+        bool useNee = params.integrator.w != 0 && lightCount != 0 && lightCdf[lightCount] > 0;
         if (useNee)
         {
-            uint sampledLight = lightIndexFromCdf(randomFloat(rng) * lightCdf[lightCount], lightCount);
+            float totalPower = lightCdf[lightCount];
+            float target = min(randomFloat(rng) * totalPower, asfloat(asuint(totalPower) - 1u));
+            uint sampledLight = lightIndexFromCdf(target, lightCount);
             Light light = lights[sampledLight];
             float r = sqrt(randomFloat(rng));
             float v = randomFloat(rng);
-            float3 lightPoint = light.p0.xyz * (1 - r) + light.p1.xyz * r * (1 - v) + light.p2.xyz * r * v;
+            bool pointLight = light.info.y == lightTypePoint;
+            float3 lightPoint = pointLight ? light.p0.xyz
+                : light.p0.xyz * (1 - r) + light.p1.xyz * r * (1 - v) + light.p2.xyz * r * v;
             float3 wi = normalize(lightPoint - position);
-            float cosine = max(0.0, dot(normal, wi));
+            float cosine = abs(dot(normal, wi));
             float pdf = lightPdf(sampledLight, light, position, lightPoint, lightCount);
-            if (pdf > 0 && cosine > 0 && dot(ng, wi) > 0)
+            if (pdf > 0 && cosine > 0 && dot(ng, wi) * dot(normal, wi) > 0)
             {
-                float3 lightNormal = normalize(cross(light.p1.xyz - light.p0.xyz, light.p2.xyz - light.p0.xyz));
-                if (dot(lightNormal, -wi) < 0)
-                    lightNormal = -lightNormal;
+                float3 lightNormal = 0;
+                if (!pointLight)
+                {
+                    lightNormal = normalize(cross(light.p1.xyz - light.p0.xyz, light.p2.xyz - light.p0.xyz));
+                    if (dot(lightNormal, -wi) < 0)
+                        lightNormal = -lightNormal;
+                }
 
-                float3 shadowOrigin = offsetRay(position, ng);
-                float3 shadowTarget = offsetRay(lightPoint, lightNormal);
+                float3 shadowOrigin = offsetRay(position, dot(ng, wi) > 0 ? ng : -ng);
+                float3 shadowTarget = pointLight ? lightPoint : offsetRay(lightPoint, lightNormal);
                 float3 shadowDelta = shadowTarget - shadowOrigin;
                 float distance = length(shadowDelta);
                 Hit shadowHit;
                 if (distance > 0 && !traceScene(shadowOrigin, shadowDelta / distance, distance - 1e-4, true, shadowHit))
                 {
                     BsdfEvaluation bsdf = evaluateBsdf(surface.material, normal, wo, wi);
-                    float weight = powerHeuristic(pdf, bsdf.pdf);
+                    // A BSDF direction sample cannot hit a zero-area point emitter, so there is no
+                    // competing estimator. Use weight 1 and divide only by light selection mass.
+                    float weight = pointLight ? 1.0f : powerHeuristic(pdf, bsdf.pdf);
                     // The light's emission is read at the sampled point so a textured emitter is
                     // estimated correctly; the barycentrics are (r * (1 - v), r * v).
                     float3 emission = lightEmission(images, samplers, light, float2(r * (1 - v), r * v));
-                    radiance += throughput * bsdf.value * emission * cosine * weight / pdf;
+                    if (pointLight)
+                    {
+                        float3 delta = lightPoint - position;
+                        emission /= max(dot(delta, delta), 1e-12);
+                    }
+                    float3 shadowAbsorption = dot(ng,wi) < 0
+                        ? transmittedAbsorption(media,surface.material,surface.frontFace,instance.material)
+                        : sigmaA;
+                    radiance += throughput * exp(-shadowAbsorption * distance) * bsdf.value * emission * cosine * weight / pdf;
                 }
             }
         }
         BsdfSample sample = sampleBsdf(surface.material, normal, wo, rng);
         direction = sample.direction;
-        if (dot(direction, ng) <= 0 || max(sample.weight.r, max(sample.weight.g, sample.weight.b)) <= 0)
-            break;
+        float side = dot(direction, ng);
+        if ((sample.transmitted ? side >= 0 : side <= 0) ||
+            max(sample.weight.r, max(sample.weight.g, sample.weight.b)) <= 0) break;
+        if (sample.transmitted && surface.material.volume)
+        {
+            if (!crossMedium(media, surface.material, surface.frontFace, instance.material)) break;
+            etaScale /= surface.material.eta * surface.material.eta;
+            cone.spread *= surface.material.eta;
+        }
         throughput *= sample.weight;
         previousPdf = sample.pdf;
         previousPosition = position;
         previousUseNee = useNee && !sample.delta;
-        origin = offsetRay(position, ng);
+        origin = offsetRay(position, sample.transmitted ? -ng : ng);
         // Re-seed the cone at the bounce: the footprint measured here becomes the width the next
         // segment starts with, while the angular spread carries over unchanged.
         cone.width = footprint;
 
         if (bounce >= 3)
         {
-            float survival = clamp(max(throughput.r, max(throughput.g, throughput.b)), 0.05, 0.95);
+            float survival = clamp(max(throughput.r, max(throughput.g, throughput.b)) * etaScale, 0.05, 0.95);
             if (randomFloat(rng) > survival)
                 break;
             throughput /= survival;

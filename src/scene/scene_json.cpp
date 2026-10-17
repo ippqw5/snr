@@ -42,33 +42,22 @@ std::string sceneJson(const Scene& scene)
 {
     std::string json = "{\n";
 
-    json += "  \"camera\": {\"eye\": " + jsonVector(scene.eye) + ", \"target\": " + jsonVector(scene.target)
-          + ", \"up\": " + jsonVector(scene.up) + ", \"fov\": " + jsonNumber(scene.fov) + "},\n";
+    json += "  \"camera\": {\"eye\": " + jsonVector(scene.eye) + ", \"target\": " + jsonVector(scene.target) + ", \"up\": " + jsonVector(scene.up) + ", \"fov\": " + jsonNumber(scene.fov) + "},\n";
     json += "  \"environment\": " + jsonVector(scene.environment) + ",\n";
     json += "  \"bounds\": {\"min\": " + jsonVector(scene.lower) + ", \"max\": " + jsonVector(scene.upper) + "},\n";
-    json += "  \"counts\": {\"triangles\": " + std::to_string(scene.indices.size())
-          + ", \"vertices\": " + std::to_string(scene.positions.size())
-          + ", \"primitives\": " + std::to_string(scene.primitives.size())
-          + ", \"instances\": " + std::to_string(scene.instances.size())
-          + ", \"materials\": " + std::to_string(scene.materials.size())
-          + ", \"lights\": " + std::to_string(scene.lights.size())
-          + ", \"textures\": " + std::to_string(scene.textures.size())
-          + ", \"samplers\": " + std::to_string(scene.samplers.size()) + "},\n";
+    json += "  \"counts\": {\"triangles\": " + std::to_string(scene.indices.size()) + ", \"vertices\": " + std::to_string(scene.positions.size()) + ", \"primitives\": " + std::to_string(scene.primitives.size()) + ", \"instances\": " + std::to_string(scene.instances.size()) + ", \"materials\": " + std::to_string(scene.materials.size()) + ", \"lights\": " + std::to_string(scene.lights.size()) + ", \"textures\": " + std::to_string(scene.textures.size()) + ", \"samplers\": " + std::to_string(scene.samplers.size()) + "},\n";
 
     // The bindless heaps. Entry i is exactly slot i of the shader's images[] and samplers[] arrays,
     // because the host fills those arrays in registration order, so the material indices below can
     // be read directly against this layout.
-    json += "  \"bindless\": {\"maxTextures\": " + std::to_string(SNR_MAX_TEXTURES)
-          + ", \"maxSamplers\": " + std::to_string(SNR_MAX_SAMPLERS) + "},\n";
+    json += "  \"bindless\": {\"maxTextures\": " + std::to_string(SNR_MAX_TEXTURES) + ", \"maxSamplers\": " + std::to_string(SNR_MAX_SAMPLERS) + "},\n";
 
     json += "  \"textures\": [";
     for (size_t index = 0; index < scene.textures.size(); ++index)
     {
         const TextureData& texture = scene.textures[index];
         json += (index == 0 ? "\n" : ",\n");
-        json += "    {\"width\": " + std::to_string(texture.width) + ", \"height\": " + std::to_string(texture.height)
-              + ", \"srgb\": " + (texture.srgb ? "true" : "false")
-              + ", \"levels\": " + std::to_string(texture.levels.size()) + "}";
+        json += "    {\"width\": " + std::to_string(texture.width) + ", \"height\": " + std::to_string(texture.height) + ", \"srgb\": " + (texture.srgb ? "true" : "false") + ", \"levels\": " + std::to_string(texture.levels.size()) + "}";
     }
     json += scene.textures.empty() ? "],\n" : "\n  ],\n";
 
@@ -77,8 +66,7 @@ std::string sceneJson(const Scene& scene)
     {
         const TextureSampler& sampler = scene.samplers[index];
         json += (index == 0 ? "\n" : ",\n");
-        json += "    {\"wrapU\": " + jsonWrap(sampler.wrapU) + ", \"wrapV\": " + jsonWrap(sampler.wrapV)
-              + ", \"nearest\": " + (sampler.nearest ? "true" : "false") + "}";
+        json += "    {\"wrapU\": " + jsonWrap(sampler.wrapU) + ", \"wrapV\": " + jsonWrap(sampler.wrapV) + ", \"nearest\": " + (sampler.nearest ? "true" : "false") + "}";
     }
     json += scene.samplers.empty() ? "],\n" : "\n  ],\n";
 
@@ -87,26 +75,7 @@ std::string sceneJson(const Scene& scene)
     {
         const GltfMaterial& material = scene.materials[index];
         json += (index == 0 ? "\n" : ",\n");
-        json += "    {\"baseColor\": " + jsonVector(material.pbrBaseColorFactor)
-              + ", \"emissive\": " + jsonVector(vec3(material.emissiveFactor.x, material.emissiveFactor.y, material.emissiveFactor.z))
-              + ", \"metallic\": " + jsonNumber(material.pbrMetallicRoughnessFactor.x)
-              + ", \"roughness\": " + jsonNumber(material.pbrMetallicRoughnessFactor.y)
-              + ", \"doubleSided\": " + (material.flags.x ? "true" : "false")
-              + ", \"alphaMode\": " + jsonAlphaMode(material.flags.z)
-              + ", \"alphaCutoff\": " + jsonNumber(material.pbrMetallicRoughnessFactor.z)
-              + ", \"baseColorTexture\": " + jsonTexture(material.pbrBaseColorTexture)
-              + ", \"baseColorSampler\": " + jsonTexture(material.pbrBaseColorSampler)
-              + ", \"metallicRoughnessTexture\": " + jsonTexture(material.pbrMetallicRoughnessTexture)
-              + ", \"metallicRoughnessSampler\": " + jsonTexture(material.pbrMetallicRoughnessSampler)
-              + ", \"normalTexture\": " + jsonTexture(material.normalTexture)
-              + ", \"normalSampler\": " + jsonTexture(material.normalSampler)
-              + ", \"normalScale\": " + jsonNumber(material.normalScale)
-              + ", \"occlusionTexture\": " + jsonTexture(material.occlusionTexture)
-              + ", \"occlusionSampler\": " + jsonTexture(material.occlusionSampler)
-              + ", \"occlusionStrength\": " + jsonNumber(material.occlusionStrength)
-              + ", \"emissiveTexture\": " + jsonTexture(material.emissiveTexture)
-              + ", \"emissiveSampler\": " + jsonTexture(material.emissiveSampler)
-              + "}";
+        json += "    {\"baseColor\": " + jsonVector(material.pbrBaseColorFactor) + ", \"emissive\": " + jsonVector(vec3(material.emissiveFactor.x, material.emissiveFactor.y, material.emissiveFactor.z)) + ", \"metallic\": " + jsonNumber(material.pbrMetallicRoughnessFactor.x) + ", \"roughness\": " + jsonNumber(material.pbrMetallicRoughnessFactor.y) + ", \"doubleSided\": " + (material.flags.x ? "true" : "false") + ", \"alphaMode\": " + jsonAlphaMode(material.flags.z) + ", \"alphaCutoff\": " + jsonNumber(material.pbrMetallicRoughnessFactor.z) + ", \"baseColorTexture\": " + jsonTexture(material.pbrBaseColorTexture) + ", \"baseColorSampler\": " + jsonTexture(material.pbrBaseColorSampler) + ", \"metallicRoughnessTexture\": " + jsonTexture(material.pbrMetallicRoughnessTexture) + ", \"metallicRoughnessSampler\": " + jsonTexture(material.pbrMetallicRoughnessSampler) + ", \"normalTexture\": " + jsonTexture(material.normalTexture) + ", \"normalSampler\": " + jsonTexture(material.normalSampler) + ", \"normalScale\": " + jsonNumber(material.normalScale) + ", \"occlusionTexture\": " + jsonTexture(material.occlusionTexture) + ", \"occlusionSampler\": " + jsonTexture(material.occlusionSampler) + ", \"occlusionStrength\": " + jsonNumber(material.occlusionStrength) + ", \"emissiveTexture\": " + jsonTexture(material.emissiveTexture) + ", \"emissiveSampler\": " + jsonTexture(material.emissiveSampler) + ", \"transmissionFactor\": " + jsonNumber(material.transmissionVolume.x) + ", \"ior\": " + jsonNumber(material.transmissionVolume.y) + ", \"thicknessFactor\": " + jsonNumber(material.transmissionVolume.z) + ", \"attenuationColor\": " + jsonVector(vec3(material.attenuation)) + ", \"attenuationDistance\": " + (material.attenuation.w > 0 ? jsonNumber(material.attenuation.w) : "null") + ", \"transmissionTexture\": " + jsonTexture(material.transmissionTextures.x) + ", \"transmissionSampler\": " + jsonTexture(material.transmissionTextures.y) + ", \"thicknessTexture\": " + jsonTexture(material.transmissionTextures.z) + ", \"thicknessSampler\": " + jsonTexture(material.transmissionTextures.w) + "}";
     }
     json += scene.materials.empty() ? "],\n" : "\n  ],\n";
 
@@ -115,9 +84,7 @@ std::string sceneJson(const Scene& scene)
     {
         const Primitive& primitive = scene.primitives[index];
         json += (index == 0 ? "\n" : ",\n");
-        json += "    {\"material\": " + std::to_string(primitive.material)
-              + ", \"firstTriangle\": " + std::to_string(primitive.firstTriangle)
-              + ", \"triangleCount\": " + std::to_string(primitive.triangleCount) + "}";
+        json += "    {\"material\": " + std::to_string(primitive.material) + ", \"firstTriangle\": " + std::to_string(primitive.firstTriangle) + ", \"triangleCount\": " + std::to_string(primitive.triangleCount) + "}";
     }
     json += scene.primitives.empty() ? "],\n" : "\n  ],\n";
 
@@ -126,11 +93,7 @@ std::string sceneJson(const Scene& scene)
     {
         const Instance& instance = scene.instances[index];
         json += (index == 0 ? "\n" : ",\n");
-        json += "    {\"primitive\": " + std::to_string(instance.primitive)
-              + ", \"material\": " + std::to_string(instance.material)
-              + ", \"lightBase\": " + (instance.lightBase == noLight ? std::string("null") : std::to_string(instance.lightBase))
-              + ", \"transform\": [" + jsonVector(instance.transformRows[0]) + ", " + jsonVector(instance.transformRows[1])
-              + ", " + jsonVector(instance.transformRows[2]) + "]}";
+        json += "    {\"primitive\": " + std::to_string(instance.primitive) + ", \"material\": " + std::to_string(instance.material) + ", \"lightBase\": " + (instance.lightBase == noLight ? std::string("null") : std::to_string(instance.lightBase)) + ", \"transform\": [" + jsonVector(instance.transformRows[0]) + ", " + jsonVector(instance.transformRows[1]) + ", " + jsonVector(instance.transformRows[2]) + "]}";
     }
     json += scene.instances.empty() ? "],\n" : "\n  ],\n";
 

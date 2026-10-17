@@ -23,6 +23,7 @@ StructuredBuffer<float2> metallicRoughnessUvs;
 StructuredBuffer<float2> normalUvs;
 StructuredBuffer<float2> occlusionUvs;
 StructuredBuffer<float2> emissiveUvs;
+StructuredBuffer<float2> transmissionUvs;
 StructuredBuffer<uint3> indices;
 StructuredBuffer<Primitive> primitives;
 StructuredBuffer<Instance> instances;
@@ -66,7 +67,7 @@ bool traceScene(float3 origin, float3 direction, float tMax, bool anyHit, out Hi
             GltfMaterial material = materials[instance.material];
             Triangle triangle = triangleAt(instance, query.CandidatePrimitiveIndex());
 
-            if (material.flags.x != 0 || dot(geometricNormal(instance, triangle), direction) < 0)
+            if (acceptSurfaceHit(instance, triangle, material, query.CandidateTriangleBarycentrics(), direction))
                 query.CommitNonOpaqueTriangleHit();
         }
     }

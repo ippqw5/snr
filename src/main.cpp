@@ -75,6 +75,11 @@ int main(int argc, char** argv)
     try
     {
         RenderOptions options;
+        if (argc == 1)
+        {
+            options.windowed = true;
+            options.mode = RenderingMode::Raster;
+        }
         options.shaderDir = SNR_SHADER_DIR;
         options.output.path = DEFAULT_OUTPUT_PATH;
         std::string              modelName;
@@ -96,18 +101,18 @@ int main(int argc, char** argv)
         cli.integer("--batch-size", "N", "Samples accumulated per dispatch", options.batchSize, 1, 256);
         cli.real("--exposure", "STOPS", "Display exposure in stops", options.display.exposure, -20, 20);
         cli.custom("--camera", "X Y Z", "Camera position", [&](CommandLine& c, int& index) {
-            eye = vec3(
-                c.nextReal(index, -1e10f, 1e10f),
-                c.nextReal(index, -1e10f, 1e10f),
-                c.nextReal(index, -1e10f, 1e10f)
-            );
+            // Read in sequence: function argument evaluation order must not reorder X/Y/Z.
+            const float x = c.nextReal(index, -1e10f, 1e10f);
+            const float y = c.nextReal(index, -1e10f, 1e10f);
+            const float z = c.nextReal(index, -1e10f, 1e10f);
+            eye = vec3(x, y, z);
         });
         cli.custom("--target", "X Y Z", "Camera target", [&](CommandLine& c, int& index) {
-            target = vec3(
-                c.nextReal(index, -1e10f, 1e10f),
-                c.nextReal(index, -1e10f, 1e10f),
-                c.nextReal(index, -1e10f, 1e10f)
-            );
+            // Read in sequence: function argument evaluation order must not reorder X/Y/Z.
+            const float x = c.nextReal(index, -1e10f, 1e10f);
+            const float y = c.nextReal(index, -1e10f, 1e10f);
+            const float z = c.nextReal(index, -1e10f, 1e10f);
+            target = vec3(x, y, z);
         });
         cli.custom("--fov", "DEGREES", "Vertical field of view", [&](CommandLine& c, int& index) {
             fov = c.nextReal(index, 0, 150);
@@ -117,15 +122,15 @@ int main(int argc, char** argv)
         });
         cli.text("--output", "PATH.png", "Rendering output path", options.output.path);
         cli.text("--shader-dir", "PATH", "Shader source directory", options.shaderDir);
-        cli.flag("--studio", "Add floor and area light to a glTF model", studio);
+        cli.flag("--studio", "Add floor and point light to a glTF model", studio);
         cli.flag("--raster", "Draw with the forward raster preview instead of the path tracer", [&] {
             options.mode = RenderingMode::Raster;
         });
-        cli.flag("--window", "Interactive raster preview; keys 1-5 switch views (implies --raster)", [&] {
+        cli.flag("--window", "Interactive GUI with glTF import and Raster / Path tracing selection", [&] {
             options.windowed = true;
             options.mode = RenderingMode::Raster;
         });
-        cli.flag("--no-nee", "Disable area-light next-event estimation", [&] { options.integrator.nee = false; });
+        cli.flag("--no-nee", "Disable direct-light next-event estimation", [&] { options.integrator.nee = false; });
         cli.flag("--validate", "Enable RHI and Vulkan validation", options.validation);
         cli.flag("--inspect", "Print scene Json without creating a GPU device", inspect);
 
@@ -144,10 +149,18 @@ int main(int argc, char** argv)
 
         if (!options.output.path.empty() && options.output.path.extension() != ".png")
             throw std::runtime_error("--output requires a .png extension");
+        options.assetDir = assetDir;
+        options.studio = studio;
+        if (modelName.empty() && options.windowed && !inspect)
+        {
+            render(Scene{}, options);
+            return 0;
+        }
         if (modelName.empty())
             throw std::runtime_error("No model specified; use --model NAME_OR_PATH or --list-models");
 
         fs::path modelPath = findModel(assetDir, modelName);
+        options.modelPath = modelPath;
 
         Scene scene;
         bool  loaded = scene.loadGltf(modelPath);

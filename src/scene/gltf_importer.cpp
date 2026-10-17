@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <numeric>
@@ -53,6 +54,9 @@ constexpr int nearest = 9728;
 constexpr const char* supportedExtensions[] = {
     "KHR_texture_transform",
     "KHR_materials_emissive_strength",
+    "KHR_materials_transmission",
+    "KHR_materials_volume",
+    "KHR_materials_ior",
 };
 
 // glTF models a material's texture slots with three distinct types -- TextureInfo,
@@ -79,6 +83,21 @@ tinygltf::TextureInfo textureInfo(const tinygltf::OcclusionTextureInfo& info)
     result.texCoord = info.texCoord;
     result.extensions = info.extensions;
     return result;
+}
+
+tinygltf::TextureInfo extensionTexture(const tinygltf::Value& object, const char* key)
+{
+    tinygltf::TextureInfo info;
+    if (!object.Has(key) || !object.Get(key).IsObject())
+        return info;
+    const auto& value = object.Get(key);
+    if (value.Has("index") && value.Get("index").IsInt())
+        info.index = value.Get("index").GetNumberAsInt();
+    if (value.Has("texCoord") && value.Get("texCoord").IsInt())
+        info.texCoord = value.Get("texCoord").GetNumberAsInt();
+    if (value.Has("extensions") && value.Get("extensions").IsObject())
+        info.extensions = value.Get("extensions").Get<tinygltf::Value::Object>();
+    return info;
 }
 
 bool validWrap(int mode)
@@ -399,6 +418,11 @@ bool GltfImporter::loadFile(const std::filesystem::path& path)
         return false;
     }
 
+    // Keep diagnostics off stdout so --inspect still emits valid JSON.
+    const auto displayPath = canonical.u8string();
+    std::fprintf(stderr, "Loading glTF: %s\n", reinterpret_cast<const char*>(displayPath.c_str()));
+    std::fflush(stderr);
+
     const fs::path root = canonical.parent_path();
     const fs::path extensionName = canonical.extension();
     if (extensionName != ".gltf" && extensionName != ".glb")
@@ -534,6 +558,7 @@ bool GltfImporter::import(int sceneIndex)
     if (!selectScene())
         return false;
 
+    m_scene->name = m_model->scenes[size_t(sceneIndex)].name;
     importMaterials();
     importGeometry();
 
@@ -659,7 +684,7 @@ uint32_t GltfImporter::buildPrimitive(const tinygltf::Primitive& primitive)
         material = m_materialIds[size_t(primitive.material)];
     }
 
-    std::vector<glm::vec2> baseUv, roughnessUv, normalUv, occlusionUv, emissiveUv;
+    std::vector<glm::vec2> baseUv, roughnessUv, normalUv, occlusionUv, emissiveUv, transmissionUv;
     if (!readUv(primitive, binding->baseColor, vertexCount, baseUv))
         return badPrimitive;
     if (!readUv(primitive, binding->metallicRoughness, vertexCount, roughnessUv))
@@ -669,6 +694,8 @@ uint32_t GltfImporter::buildPrimitive(const tinygltf::Primitive& primitive)
     if (!readUv(primitive, binding->occlusion, vertexCount, occlusionUv))
         return badPrimitive;
     if (!readUv(primitive, binding->emissive, vertexCount, emissiveUv))
+        return badPrimitive;
+    if (!readUv(primitive, binding->transmission, vertexCount, transmissionUv))
         return badPrimitive;
 
     std::vector<uint32_t> indices;
@@ -687,9 +714,9 @@ uint32_t GltfImporter::buildPrimitive(const tinygltf::Primitive& primitive)
     // vertices a surviving triangle references (remap[corner] is that vertex's id within the window),
     // so the window never exceeds three times the triangle count. That bound is what lets the
     // acceleration structure build recover the triangle count from the vertex and index counts.
-    const uint32_t vertexBase = uint32_t(m_scene->positions.size());
+    const uint32_t        vertexBase = uint32_t(m_scene->positions.size());
     std::vector<uint32_t> remap(vertexCount, uint32_t(-1));
-    const auto localVertex = [&](uint32_t corner) {
+    const auto            localVertex = [&](uint32_t corner) {
         uint32_t& slot = remap[corner];
         if (slot == uint32_t(-1))
         {
@@ -712,6 +739,7 @@ uint32_t GltfImporter::buildPrimitive(const tinygltf::Primitive& primitive)
             m_scene->normalUvs.push_back(uvAt(normalUv, corner));
             m_scene->occlusionUvs.push_back(uvAt(occlusionUv, corner));
             m_scene->emissiveUvs.push_back(uvAt(emissiveUv, corner));
+            m_scene->transmissionUvs.push_back(uvAt(transmissionUv, corner));
         }
         return slot;
     };
@@ -751,6 +779,7 @@ uint32_t GltfImporter::buildPrimitive(const tinygltf::Primitive& primitive)
         m_scene->normalUvs.resize(vertexBase);
         m_scene->occlusionUvs.resize(vertexBase);
         m_scene->emissiveUvs.resize(vertexBase);
+        m_scene->transmissionUvs.resize(vertexBase);
         return badPrimitive;
     }
 
@@ -967,7 +996,7 @@ int GltfImporter::textureFor(int imageIndex, bool srgb)
 
     // Level 0 is tightly packed RGBA8. An sRGB texture keeps its encoded values and relies on the sRGB
     // texture format to linearise on sample, so colour and data textures share this one code path.
-    TextureData                texture;
+    TextureData texture;
     texture.width = image->width;
     texture.height = image->height;
     texture.srgb = srgb;
@@ -1079,9 +1108,8 @@ void GltfImporter::importMaterials()
         material.pbrMetallicRoughnessFactor.y = float(pbr.roughnessFactor);
         material.flags.x = source.doubleSided ? 1u : 0u;
         material.flags.y = 1u; // Enable the metallic-roughness response.
-        // glTF alpha handling. The raster preview discards MASK fragments below the cutoff and draws
-        // BLEND in a second, sorted pass; the path tracer reads neither and treats every surface as
-        // opaque.
+        // MASK coverage is tested in both pipelines. Raster draws BLEND in a sorted pass;
+        // path-traced BLEND coverage remains opaque. Optical transmission is independent of alpha.
         material.flags.z = alphaModeOpaque;
         if (source.alphaMode == "MASK")
             material.flags.z = alphaModeMask;
@@ -1134,6 +1162,66 @@ void GltfImporter::importMaterials()
         bindTexture(textureInfo(source.emissiveTexture), true, binding.emissive, material.emissiveTexture, material.emissiveSampler);
         material.normalScale = float(source.normalTexture.scale);
         material.occlusionStrength = float(source.occlusionTexture.strength);
+
+        if (const auto* ext = extension(source.extensions, "KHR_materials_transmission"))
+        {
+            if (ext->IsObject())
+            {
+                getNumber(*ext, "transmissionFactor", material.transmissionVolume.x);
+                if (!std::isfinite(material.transmissionVolume.x))
+                    material.transmissionVolume.x = 0;
+                material.transmissionVolume.x = std::clamp(material.transmissionVolume.x, 0.0f, 1.0f);
+                bindTexture(extensionTexture(*ext, "transmissionTexture"), false, binding.transmission,
+                            material.transmissionTextures.x, material.transmissionTextures.y);
+            }
+            else
+                warn("Invalid KHR_materials_transmission; using defaults");
+        }
+        if (const auto* ext = extension(source.extensions, "KHR_materials_ior"))
+        {
+            if (ext->IsObject())
+                getNumber(*ext, "ior", material.transmissionVolume.y);
+            if (!std::isfinite(material.transmissionVolume.y) ||
+                (material.transmissionVolume.y != 0 && material.transmissionVolume.y < 1))
+            {
+                warn("Invalid KHR_materials_ior; using IOR 1.5");
+                material.transmissionVolume.y = 1.5f;
+            }
+        }
+        if (const auto* ext = extension(source.extensions, "KHR_materials_volume"))
+        {
+            if (ext->IsObject())
+            {
+                getNumber(*ext, "thicknessFactor", material.transmissionVolume.z);
+                if (!std::isfinite(material.transmissionVolume.z) || material.transmissionVolume.z < 0)
+                {
+                    warn("Invalid volume thicknessFactor; using a thin wall");
+                    material.transmissionVolume.z = 0;
+                }
+                getNumbers(*ext, "attenuationColor", &material.attenuation.x, 3);
+                for (int channel = 0; channel < 3; ++channel)
+                    material.attenuation[channel] = std::isfinite(material.attenuation[channel])
+                                                        ? std::clamp(material.attenuation[channel], 0.0f, 1.0f)
+                                                        : 1.0f;
+                getNumber(*ext, "attenuationDistance", material.attenuation.w);
+                if (ext->Has("attenuationDistance") && ext->Get("attenuationDistance").IsNumber() &&
+                    ext->Get("attenuationDistance").GetNumberAsDouble() > std::numeric_limits<float>::max())
+                    material.attenuation.w = std::numeric_limits<float>::max();
+                if (ext->Has("attenuationDistance") &&
+                    (!std::isfinite(material.attenuation.w) || material.attenuation.w <= 0))
+                {
+                    warn("Invalid attenuationDistance; using infinite attenuation distance");
+                    material.attenuation.w = 0;
+                }
+                // Preserve the authored texture metadata. Both rendering paths trace the true
+                // interior distance, so thicknessTexture is intentionally not sampled (KHR spec).
+                TextureCoordinates thicknessCoordinates;
+                bindTexture(extensionTexture(*ext, "thicknessTexture"), false, thicknessCoordinates,
+                            material.transmissionTextures.z, material.transmissionTextures.w);
+            }
+            else
+                warn("Invalid KHR_materials_volume; using defaults");
+        }
 
         m_materialIds.push_back(uint32_t(m_scene->materials.size()));
         m_bindings.push_back(binding);

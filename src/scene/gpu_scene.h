@@ -5,6 +5,7 @@
 
 #include <slang-rhi/shader-cursor.h>
 
+#include <functional>
 #include <vector>
 
 namespace snr
@@ -19,15 +20,19 @@ struct InstanceDraw
     // Set when the instance's material is glTF BLEND, which draws after the opaque group, unsorted
     // depth writes off, into the colour already there.
     bool blend;
+    bool mask; // MASK needs late depth writes so discarded texels leave depth untouched.
     // World-space instance origin, the key the transparent group is sorted back to front by.
     glm::vec3 origin;
 };
+
+// Called on the render thread at safe points between upload/build operations.
+using UploadProgress = std::function<void(float, const char*)>;
 
 // An immutable GPU snapshot. CPU scene data is not retained after upload.
 class GpuScene
 {
 public:
-    GpuScene(DeviceContext& context, const Scene& scene);
+    GpuScene(DeviceContext& context, const Scene& scene, const UploadProgress& progress = {});
     GpuScene(const GpuScene&) = delete;
     GpuScene& operator=(const GpuScene&) = delete;
 
@@ -35,10 +40,14 @@ public:
     void bind(const rhi::ShaderCursor& root) const;
     // Binds the scene for the raster preview, which declares no acceleration structure and no
     // per-triangle light list.
-    void bindRaster(const rhi::ShaderCursor& root) const;
+    void     bindRaster(const rhi::ShaderCursor& root) const;
     uint32_t lightCount() const
     {
         return m_lightCount;
+    }
+    uint32_t triangleLightCount() const
+    {
+        return m_triangleLightCount;
     }
     const std::vector<InstanceDraw>& draws() const
     {
@@ -47,16 +56,16 @@ public:
 
 private:
     void bindBuffers(const rhi::ShaderCursor& root) const;
-    void buildAccelerationStructures(DeviceContext& context, const Scene& scene);
+    void buildAccelerationStructures(DeviceContext& context, const Scene& scene, const UploadProgress& progress);
 
-    uint32_t m_lightCount = 0;
+    uint32_t m_lightCount = 0, m_triangleLightCount = 0;
 
     std::vector<InstanceDraw> m_draws;
 
     // The acceleration structures read the position and index buffers, so they outlive the build.
     // The shader reads the same two buffers, so the geometry is uploaded exactly once.
     rhi::ComPtr<rhi::IBuffer> m_positions, m_normals, m_baseColorUvs, m_metallicRoughnessUvs, m_indices;
-    rhi::ComPtr<rhi::IBuffer> m_normalUvs, m_occlusionUvs, m_emissiveUvs;
+    rhi::ComPtr<rhi::IBuffer> m_normalUvs, m_occlusionUvs, m_emissiveUvs, m_transmissionUvs;
     rhi::ComPtr<rhi::IBuffer> m_instanceData;
     // One bottom-level structure per primitive; the top-level structure references them all.
     std::vector<rhi::ComPtr<rhi::IAccelerationStructure>> m_blas;

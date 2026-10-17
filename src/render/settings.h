@@ -57,6 +57,22 @@ enum class RenderingMode
     Raster,
 };
 
+// Editable state of the interactive preview. Path tracing advances one small batch per frame.
+struct PreviewControls
+{
+    RenderingMode      mode = RenderingMode::Raster;
+    uint32_t           targetSamples = 256;
+    uint32_t           samplesPerFrame = 1;
+    IntegratorSettings integrator;
+    DisplaySettings    display;
+    ImageSize          resolution;
+    bool               followWindow = true;
+    // Applied to the next GUI import, independently of the currently displayed scene.
+    bool studio = false;
+    bool paused = false;
+    bool restart = false;
+};
+
 struct OutputSettings
 {
     std::filesystem::path path;

@@ -46,15 +46,22 @@ struct TextureSampler
     bool operator==(const TextureSampler&) const = default;
 };
 
+// An analytic, isotropic emitter. Intensity is radiant power per unit solid angle (RGB).
+struct PointLight
+{
+    glm::vec3 position;
+    glm::vec3 intensity;
+};
+
 struct Scene
 {
     // Geometry in object space, split into the typed arrays the shader indexes: one entry per vertex
     // for the attributes, and three vertex ids per triangle in `indices`. Each primitive owns a
     // contiguous window of the vertex arrays and stores the offsets of its own vertices, so a vertex
     // shared by several triangles inside one primitive is stored once.
-    std::vector<glm::vec3>  positions;
-    std::vector<glm::vec3>  normals; // Zero when the source had no usable normal; the shader then
-                                     // falls back to the geometric normal.
+    std::vector<glm::vec3> positions;
+    std::vector<glm::vec3> normals; // Zero when the source had no usable normal; the shader then
+                                    // falls back to the geometric normal.
     // One UV array per material texture slot, because every slot may pick its own TEXCOORD set and its
     // own KHR_texture_transform; the transform is baked into these values.
     std::vector<glm::vec2>  baseColorUvs;
@@ -62,19 +69,21 @@ struct Scene
     std::vector<glm::vec2>  normalUvs;
     std::vector<glm::vec2>  occlusionUvs;
     std::vector<glm::vec2>  emissiveUvs;
+    std::vector<glm::vec2>  transmissionUvs;
     std::vector<glm::uvec3> indices; // Vertex ids local to the owning primitive's window
 
     // Unique geometry in object space, and the instances that place it in the world.
     std::vector<Primitive> primitives;
     std::vector<Instance>  instances;
 
-    std::vector<GltfMaterial>   materials;
-    std::vector<Light>          lights; // World space, addressed through Instance::lightBase
+    std::vector<GltfMaterial> materials;
+    std::vector<PointLight>   pointLights; // Retained analytic emitters, rebuilt into lights by finalize()
+    std::vector<Light>        lights;      // World-space triangles first, then point lights
     // Maps an instance's local triangle id to its light in `lights`, or -1 when that triangle emits
     // nothing. An instance owns a contiguous run of entries starting at its lightBase, so a hit's
     // light is triangleLights[lightBase + localTriangle]. Emitters whose texture is black are left out
     // of `lights` so they do not dilute next-event estimation; those hits just carry no light index.
-    std::vector<int32_t>        triangleLights;
+    std::vector<int32_t> triangleLights;
     // Cumulative power of the lights, one entry per light plus a trailing total. Light sampling picks
     // by brightness, so a small emitter does not take as many samples as a large bright one.
     std::vector<float>          lightCdf;
@@ -92,6 +101,7 @@ struct Scene
     std::vector<std::string> errors;
     std::vector<std::string> warnings;
     int                      currentScene = -1;
+    std::string              name; // Selected glTF scene name, when supplied by the asset.
 
     // Loads a .gltf/.glb and derives everything above. Returns false when nothing usable could be
     // imported, in which case errors describes why; warnings always describe recoverable problems.
@@ -106,7 +116,7 @@ struct Scene
 
     uint32_t addMaterial(glm::vec3 color, glm::vec3 emission = glm::vec3(0.0f));
     // Appends a quad as two triangles sharing four vertices, and registers it as one primitive.
-    void     addQuad(glm::vec3 a, glm::vec3 b, glm::vec3 c, glm::vec3 d, uint32_t material);
+    void addQuad(glm::vec3 a, glm::vec3 b, glm::vec3 c, glm::vec3 d, uint32_t material);
     // Registers a triangle range in `indices`, drawing on the vertex window that starts at
     // `vertexBase`, as a primitive and returns its index.
     uint32_t addPrimitive(

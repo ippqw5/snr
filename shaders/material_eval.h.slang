@@ -30,6 +30,7 @@ struct Triangle
     float2 normalUv0, normalUv1, normalUv2;
     float2 occlusionUv0, occlusionUv1, occlusionUv2;
     float2 emissiveUv0, emissiveUv1, emissiveUv2;
+    float2 transmissionUv0, transmissionUv1, transmissionUv2;
 };
 
 float3 transformPoint(Instance instance, float3 point)
@@ -73,6 +74,9 @@ Triangle triangleAt(Instance instance, uint localTriangle)
     triangle.emissiveUv0 = emissiveUvs[ids.x];
     triangle.emissiveUv1 = emissiveUvs[ids.y];
     triangle.emissiveUv2 = emissiveUvs[ids.z];
+    triangle.transmissionUv0 = transmissionUvs[ids.x];
+    triangle.transmissionUv1 = transmissionUvs[ids.y];
+    triangle.transmissionUv2 = transmissionUvs[ids.z];
     return triangle;
 }
 
@@ -90,6 +94,8 @@ float3 geometricNormal(Instance instance, Triangle triangle)
 // density (UV area per world area) and passed to SampleGrad as an isotropic gradient.
 float2 textureGradient(float footprint, float3 edge1, float3 edge2, float2 uv0, float2 uv1, float2 uv2)
 {
+    // Secondary preview rays cannot use derivatives from unrelated fragment quads.
+    if (footprint < 0) return float2(-1);
     float worldArea = length(cross(edge1, edge2));
     float2 duv1 = uv1 - uv0;
     float2 duv2 = uv2 - uv0;
@@ -119,7 +125,7 @@ float4 sampleTexture(
     SamplerState sampler = samplers[uint(samplerIndex)];
 #ifdef RASTER_PIPELINE
     // A fragment shader runs per pixel quad, so the hardware can pick the mip from the derivatives.
-    return image.Sample(sampler, uv);
+    return gradient.x < 0 ? image.SampleLevel(sampler, uv, 0) : image.Sample(sampler, uv);
 #else
     return image.SampleGrad(sampler, uv, gradient, gradient);
 #endif
@@ -172,11 +178,22 @@ SurfaceMaterial materialAt(
         material.emissiveSampler, triangle.emissiveUv0, triangle.emissiveUv1, triangle.emissiveUv2,
         bary, emissiveGradient).rgb;
 
+    float2 transmissionGradient = textureGradient(footprint, edge1, edge2,
+        triangle.transmissionUv0, triangle.transmissionUv1, triangle.transmissionUv2);
+    float transmitted = sampleTexture(images, samplers, material.transmissionTextures.x,
+        material.transmissionTextures.y, triangle.transmissionUv0, triangle.transmissionUv1,
+        triangle.transmissionUv2, bary, transmissionGradient).r;
+    result.transmission = saturate(material.transmissionVolume.x * transmitted);
+    result.ior = material.transmissionVolume.y == 0 ? 1e6 : material.transmissionVolume.y;
+    result.eta = 1 / result.ior;
+    // Ray-based rendering uses actual geometry distances, not the baked thickness map.
+    result.volume = material.transmissionVolume.z > 0;
+    result.attenuation = material.attenuation;
     result.diffuseOnly = material.flags.y == 0;
     return result;
 }
 
-// Emitted radiance of a light triangle at barycentric (bary.x, bary.y), for next-event estimation.
+// Triangle emitted radiance at barycentric (bary.x, bary.y), or point radiant intensity for NEE.
 // The same expression materialAt() uses, so the two estimators agree; the mip is level 0 because a
 // light sample is a single point with no footprint to blur by.
 float3 lightEmission(
@@ -185,6 +202,8 @@ float3 lightEmission(
     Light light,
     float2 bary)
 {
+    if (light.info.y == lightTypePoint)
+        return light.p1.rgb;
     GltfMaterial material = materials[light.info.x];
     if (material.emissiveTexture < 0)
         return material.emissiveFactor.rgb;
@@ -203,9 +222,8 @@ float3 lightEmission(
 // of its own and the raster preview is the only caller. The raster pipeline never invokes it for the
 // path tracer, which has its own traversal in scene.slang.
 //
-// The first candidate is committed and traversal stops, which is all an occlusion test needs. Note the
-// ray flags stay RAY_FLAG_NONE with an explicit commit: an inline query in a graphics pipeline that
-// relies on RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH to commit for it reports a miss on this backend.
+// The preview uses binary triangle visibility, including for transparent materials. Force opaque
+// traversal so hardware can accept the first blocker without returning candidates to the shader.
 bool occluded(RaytracingAccelerationStructure bvh, float3 origin, float3 direction, float distance)
 {
     if (distance <= 0)
@@ -217,10 +235,9 @@ bool occluded(RaytracingAccelerationStructure bvh, float3 origin, float3 directi
     ray.TMin = 0;
     ray.TMax = distance;
 
-    RayQuery<RAY_FLAG_NONE> query;
+    RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> query;
     query.TraceRayInline(bvh, RAY_FLAG_NONE, 0xff, ray);
-    while (query.Proceed())
-        query.CommitNonOpaqueTriangleHit();
+    while (query.Proceed()) {}
     return query.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
 }
 
@@ -276,6 +293,7 @@ struct SurfaceInteraction
     float3 geometricNormal;
     float3 normal;
     SurfaceMaterial material;
+    bool frontFace;
 };
 
 SurfaceInteraction surfaceAt(
@@ -306,7 +324,8 @@ SurfaceInteraction surfaceAt(
     // A perturbed normal can tilt past the surface plane; keep it on the side geometry faces.
     if (dot(normal, ng) < 0)
         normal = -normal;
-    if (dot(ng, wo) < 0)
+    surface.frontFace = dot(ng, wo) >= 0;
+    if (!surface.frontFace)
     {
         ng = -ng;
         normal = -normal;
@@ -315,7 +334,20 @@ SurfaceInteraction surfaceAt(
     surface.geometricNormal = ng;
     surface.normal = dot(normal, wo) > 0 ? normal : ng;
     surface.material = materialAt(images, samplers, instance, triangle, material, bary, footprint);
+    if (surface.material.volume && !surface.frontFace) surface.material.eta = surface.material.ior;
     return surface;
+}
+
+bool acceptSurfaceHit(Instance instance, Triangle triangle, GltfMaterial material, float2 bary, float3 direction)
+{
+    if (material.flags.x == 0 && material.transmissionVolume.z == 0 &&
+        dot(geometricNormal(instance, triangle), direction) >= 0) return false;
+    if (material.flags.z == alphaModeMask)
+    {
+        SurfaceMaterial evaluated = materialAt(images, samplers, instance, triangle, material, bary, -1);
+        if (evaluated.alpha < material.pbrMetallicRoughnessFactor.z) return false;
+    }
+    return true;
 }
 
 // Picks a light from the cumulative power distribution. `target` is uniform in [0, total); the light
@@ -344,6 +376,9 @@ float selectProbability(uint index, uint lightCount)
 
 float lightPdf(uint lightIndex, Light light, float3 from, float3 to, uint lightCount)
 {
+    // Point-light sampling has discrete probability mass, not a solid-angle density.
+    if (light.info.y == lightTypePoint)
+        return selectProbability(lightIndex, lightCount);
     float3 delta = to - from;
     float distanceSquared = dot(delta, delta);
     float3 crossEdges = cross(light.p1.xyz - light.p0.xyz, light.p2.xyz - light.p0.xyz);

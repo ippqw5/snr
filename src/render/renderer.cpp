@@ -1,5 +1,6 @@
 #include "./renderer.h"
 
+#include "../app/preview_ui.h"
 #include "../app/window.h"
 #include "../gpu/device.h"
 #include "../gpu/shader_library.h"
@@ -7,10 +8,15 @@
 #include "./rasterizer.h"
 #include "./session.h"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
+#include <future>
 #include <glm/gtc/matrix_transform.hpp>
+#include <stdexcept>
+#include <thread>
 
 namespace snr
 {
@@ -63,9 +69,13 @@ void applyCameraInput(Window& window, CameraSettings& camera)
     if (scroll.y != 0)
     {
         constexpr float kDollyFractionPerNotch = 0.1f;
-        glm::vec3       shift = glm::normalize(camera.target - camera.eye) * (scroll.y * kDollyFractionPerNotch);
-        camera.eye += shift;
-        camera.target += shift;
+        // Zoom about the orbit anchor: only the eye moves, so the next left drag still
+        // rotates around the same target. A positive distance prevents crossing the anchor.
+        const float currentDistance = glm::length(camera.eye - camera.target);
+        const float newDistance = std::clamp(
+            currentDistance * std::exp(-scroll.y * kDollyFractionPerNotch), 0.02f, 1e10f
+        );
+        camera.eye = camera.target + (camera.eye - camera.target) * (newDistance / currentDistance);
     }
 }
 
@@ -84,86 +94,180 @@ void reportSetup(std::chrono::steady_clock::time_point setupStart)
 // drawable area and skips the frame.
 void renderWindowed(const Scene& scene, const RenderOptions& options)
 {
-    struct ViewShortcut
-    {
-        uint32_t    view;
-        const char* name;
+    constexpr std::array<uint32_t, 5> views = {
+        rasterDebugShaded, rasterDebugDepth, rasterDebugObjectId, rasterDebugBaseColor, rasterDebugNormal
     };
-    constexpr std::array<ViewShortcut, 5> views = {{
-        {rasterDebugShaded, "Shaded"},
-        {rasterDebugDepth, "Depth"},
-        {rasterDebugObjectId, "Object ID"},
-        {rasterDebugBaseColor, "Base Color"},
-        {rasterDebugNormal, "Normal"},
-    }};
 
     auto           setupStart = std::chrono::steady_clock::now();
     DeviceContext  context(options.shaderDir, options.validation);
     RenderSettings settings(options.image, cameraFromScene(scene), options.integrator);
     ShaderLibrary  shaders(context, "rasterizer.slang");
 
-    Window        window("snr | Shaded | 1-5: views", settings.imageSize, context);
-    RasterSession session(shaders, scene, settings);
+    Window                         window("snr gui", settings.imageSize, context);
+    PreviewUi                      ui(context, window, options.modelPath.empty() ? options.assetDir : options.modelPath.parent_path());
+    std::unique_ptr<ShaderLibrary> pathShaders;
+    std::unique_ptr<PathSession>   pathSession;
+    std::unique_ptr<RasterSession> session;
+    PreviewControls                controls;
+    controls.resolution = options.image;
+    controls.targetSamples = options.spp;
+    controls.integrator = options.integrator;
+    controls.display = options.display;
+    controls.studio = options.studio;
+    if (!scene.instances.empty())
+        session = std::make_unique<RasterSession>(shaders, scene, settings);
+    if (!options.modelPath.empty())
+        ui.setModel(options.modelPath, scene.name);
     reportSetup(setupStart);
 
-    CameraSettings camera = settings.camera;
-    auto           statsStart = std::chrono::steady_clock::now();
-    uint32_t       frameCount = 0;
-    uint32_t       viewIndex = 0;
-    while (window.pump())
-    {
-        if (auto key = window.numberKeyPressed(); key && *key >= 1 && *key <= views.size())
+    CameraSettings        camera = settings.camera;
+    uint32_t              viewIndex = 0;
+    std::future<Scene>    pendingImport;
+    std::filesystem::path pendingPath;
+    auto                  lastLoadingFrame = std::chrono::steady_clock::time_point{};
+    std::string           lastLoadingStage;
+    // GPU creation stays on this thread. Repaint the loading UI at safe points between operations.
+    auto uploadProgress = [&](float fraction, const char* stage) {
+        ui.setLoading(true, fraction, stage);
+        const auto now = std::chrono::steady_clock::now();
+        if (lastLoadingStage == stage && now - lastLoadingFrame < std::chrono::milliseconds(33))
+            return;
+        lastLoadingFrame = now;
+        lastLoadingStage = stage;
+        if (!window.pump(ui.capturesKeyboard()))
+            throw std::runtime_error("Import cancelled: window closed");
+        ui.update(viewIndex, camera, controls, pathSession ? pathSession->samples() : 0);
+        if (auto image = window.acquireImage())
         {
-            if (viewIndex != *key - 1)
+            ui.draw(image, true);
+            window.present();
+        }
+        else
+            ui.drawPlatformWindows();
+    };
+    while (window.pump(ui.capturesKeyboard()))
+    {
+        if (auto key = window.numberKeyPressed(); controls.mode == RenderingMode::Raster && !ui.capturesKeyboard() && key && *key >= 1 && *key <= views.size())
+            viewIndex = *key - 1;
+        ImageSize size = window.framebufferSize();
+
+        if (pendingImport.valid() && pendingImport.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+        {
+            try
             {
-                viewIndex = *key - 1;
-                session.setDebugView(views[viewIndex].view);
-                window.setTitle(std::string("snr | ") + views[viewIndex].name + " | 1-5: views");
-                statsStart = std::chrono::steady_clock::now();
-                frameCount = 0;
+                Scene           imported = pendingImport.get();
+                const ImageSize drawable = controls.followWindow && size.width && size.height ? size : controls.resolution;
+                RenderSettings  replacementSettings(drawable, cameraFromScene(imported), options.integrator);
+                // Build the replacement before releasing the working scene, so failed imports leave
+                // the existing preview and camera intact.
+                auto replacement = std::make_unique<RasterSession>(shaders, imported, replacementSettings, uploadProgress);
+                context.queue()->waitOnHost();
+                pathSession.reset();
+                session = std::move(replacement);
+                camera = replacementSettings.camera;
+                ui.setModel(pendingPath, imported.name);
+            }
+            catch (const std::exception& error)
+            {
+                std::fprintf(stderr, "Import failed: %s\n", error.what());
+                ui.setError(error.what());
+            }
+            ui.setLoading(false);
+            // Progress callbacks process resize events while the replacement is being built.
+            size = window.framebufferSize();
+        }
+        if (controls.followWindow && size.width && size.height)
+            controls.resolution = size;
+        ui.update(viewIndex, camera, controls, pathSession ? pathSession->samples() : 0);
+        if (auto path = ui.takeModel(); path && !pendingImport.valid())
+        {
+            pendingPath = *path;
+            ui.setLoading(true);
+            try
+            {
+                pendingImport = std::async(std::launch::async, [path = *path, studio = controls.studio] {
+                    Scene imported;
+                    if (!imported.loadGltf(path))
+                    {
+                        std::string errors = "Cannot import this scene";
+                        for (const auto& error : imported.errors)
+                            errors += "\n" + error;
+                        throw std::runtime_error(errors);
+                    }
+                    for (const auto& warning : imported.warnings)
+                        std::fprintf(stderr, "Warning: %s\n", warning.c_str());
+                    if (studio)
+                        addStudio(imported);
+                    return imported;
+                });
+            }
+            catch (const std::exception& error)
+            {
+                ui.setLoading(false);
+                ui.setError(error.what());
             }
         }
-        const ImageSize size = window.framebufferSize();
-        if (size.width == 0 || size.height == 0)
+        if (size.width && size.height && !ui.capturesMouse())
+            applyCameraInput(window, camera);
+        if (controls.mode == RenderingMode::PathTracing && session && !pathSession)
         {
-            statsStart = std::chrono::steady_clock::now();
-            frameCount = 0;
-            continue;
+            try
+            {
+                if (!pathShaders)
+                    pathShaders = std::make_unique<ShaderLibrary>(context, "pathtracer.slang");
+                pathSession = std::make_unique<PathSession>(*pathShaders, *session);
+            }
+            catch (const std::exception& error)
+            {
+                controls.mode = RenderingMode::Raster;
+                ui.setError(error.what());
+            }
         }
-
-        if (size != session.settings().imageSize)
-            session.resize(size);
-
-        applyCameraInput(window, camera);
-        session.setCamera(camera);
+        Session* active = controls.mode == RenderingMode::PathTracing
+                              ? static_cast<Session*>(pathSession.get())
+                              : session.get();
+        if (active)
+        {
+            const ImageSize resolution = controls.followWindow && size.width && size.height ? size : controls.resolution;
+            if (resolution != active->settings().imageSize)
+                active->resize(resolution);
+            active->setCamera(camera);
+            if (controls.mode == RenderingMode::PathTracing)
+            {
+                pathSession->setIntegrator(controls.integrator);
+                pathSession->setSampling(controls.targetSamples, controls.samplesPerFrame);
+                if (controls.restart)
+                    pathSession->reset();
+            }
+            else
+                session->setDebugView(views[viewIndex]);
+        }
+        controls.restart = false;
 
         auto image = window.acquireImage();
         if (!image)
         {
-            statsStart = std::chrono::steady_clock::now();
-            frameCount = 0;
+            ui.drawPlatformWindows();
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
         }
 
-        session.render();
-        session.present(image, options.display);
-        window.present();
-
-        ++frameCount;
-        const auto   now = std::chrono::steady_clock::now();
-        const double elapsed = std::chrono::duration<double>(now - statsStart).count();
-        if (elapsed >= 0.5)
+        if (active)
         {
-            char title[128];
-            std::snprintf(
-                title, sizeof(title), "snr | %s | %.1f FPS | %.2f ms/frame | 1-5: views",
-                views[viewIndex].name, double(frameCount) / elapsed, elapsed * 1000.0 / double(frameCount)
-            );
-            window.setTitle(title);
-            statsStart = now;
-            frameCount = 0;
+            if (controls.mode == RenderingMode::PathTracing)
+            {
+                // Even when paused, draw a fresh first batch after camera/scene changes.
+                if (!controls.paused || pathSession->samples() == 0)
+                    pathSession->renderStep();
+            }
+            else
+                session->render();
+            active->present(image, controls.display);
         }
+        ui.draw(image, !active);
+        window.present();
     }
+    context.queue()->waitOnHost();
 }
 } // namespace
 

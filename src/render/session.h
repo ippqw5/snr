@@ -21,7 +21,7 @@ namespace snr
 class Session
 {
 public:
-    Session(ShaderLibrary& shaders, const Scene& scene, const RenderSettings& settings);
+    Session(ShaderLibrary& shaders, const Scene& scene, const RenderSettings& settings, const UploadProgress& progress = {});
     virtual ~Session() = default;
     Session(const Session&) = delete;
     Session& operator=(const Session&) = delete;
@@ -46,17 +46,24 @@ public:
     virtual void render() = 0;
 
     RenderResult readback(const DisplaySettings& display = {});
+    // Both pipelines display their accumulated linear film through the same swapchain pass.
+    void present(rhi::ITexture* target, const DisplaySettings& display);
 
 protected:
-    DeviceContext&                     m_context;
+    // Reuse the immutable GPU scene when creating a second renderer for the same model.
+    Session(ShaderLibrary& shaders, const Session& source);
+    DeviceContext& m_context;
     // Retained so a subclass can create a pipeline after construction, as the windowed present pass
     // does once it knows the swapchain's format.
     ShaderLibrary&                     m_shaders;
     RenderSettings                     m_settings;
     glm::vec3                          m_environment;
-    std::unique_ptr<GpuScene>          m_scene;
+    std::shared_ptr<GpuScene>          m_scene;
     Film                               m_film;
     rhi::ComPtr<rhi::IComputePipeline> m_tonemap;
+    std::unique_ptr<ShaderLibrary>     m_presentShaders;
+    rhi::ComPtr<rhi::IRenderPipeline>  m_present;
+    rhi::Format                        m_presentFormat = rhi::Format::Undefined;
 };
 
 // Progressive path tracing: render() accumulates toward RenderSettings::samplesPerPixel, so a session
@@ -65,6 +72,10 @@ class PathSession : public Session
 {
 public:
     PathSession(ShaderLibrary& shaders, const Scene& scene, const RenderSettings& settings);
+    PathSession(ShaderLibrary& shaders, const Session& source);
+    void setSampling(uint32_t targetSamples, uint32_t samplesPerFrame);
+    // Dispatch at most one batch; return false after reaching the target.
+    bool renderStep();
 
     void setIntegrator(const IntegratorSettings& integrator);
     void setEnvironment(glm::vec3 environment);

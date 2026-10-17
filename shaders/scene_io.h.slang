@@ -74,10 +74,13 @@ SNR_IO_STATIC_ASSERT(sizeof(Instance) == 112);
 // A world-space emissive triangle, used for next-event estimation. The UVs let light sampling read a
 // spatially varying emissive texture at the sampled point instead of assuming a flat factor. They are
 // packed into float4 slots so the layout does not depend on how either side aligns a float2.
+static const uint lightTypeTriangle = 0;
+static const uint lightTypePoint = 1;
+
 struct Light
 {
-    float4 p0, p1, p2;
-    uint4  info; // Material index, reserved, reserved, reserved
+    float4 p0, p1, p2; // Triangle vertices; for POINT: p0.xyz position, p1.rgb radiant intensity
+    uint4  info; // Material index (TRIANGLE only), light type, reserved, reserved
     float4 uv01; // Emissive texture UV of p0 in .xy and of p1 in .zw
     float4 uv2;  // Emissive texture UV of p2 in .xy
 };
@@ -123,8 +126,11 @@ struct GltfMaterial
     int    emissiveSampler = 0;
     float  normalScale = 1.0f;       // normalTexture.scale
     float  occlusionStrength = 1.0f; // occlusionTexture.strength
+    float4 transmissionVolume = float4(0.0f, 1.5f, 0.0f, 0.0f); // transmission, IOR, thicknessFactor, reserved
+    float4 attenuation = float4(1.0f, 1.0f, 1.0f, 0.0f); // color, distance (0 means infinite)
+    int4 transmissionTextures = int4(-1, 0, -1, 0); // transmission image/sampler, thickness image/sampler
 };
-SNR_IO_STATIC_ASSERT(sizeof(GltfMaterial) == 112);
+SNR_IO_STATIC_ASSERT(sizeof(GltfMaterial) == 160);
 
 // Per-dispatch constants for the path tracer.
 struct Params
@@ -158,7 +164,7 @@ struct RasterParams
     float4 eye;             // Eye position, w holds tan(fov / 2)
     float4 environment;     // Constant environment radiance; w is the eye-to-target distance, the
                             // reference the depth debug view normalises by
-    uint4  counts;          // Number of lights, the debug view (rasterDebug*), rest reserved
+    uint4  counts;          // Total lights, debug view (rasterDebug*), triangle light count, reserved
 };
 SNR_IO_STATIC_ASSERT(sizeof(RasterParams) == 112);
 
@@ -167,7 +173,7 @@ SNR_IO_STATIC_ASSERT(sizeof(RasterParams) == 112);
 // values and leaves the encode to the hardware instead of double-encoding.
 struct PresentParams
 {
-    uint4  image;  // Width and height of the target, rest reserved
+    uint4  image;  // Film width/height, target width/height
     float4 config; // Exposure in stops, sRGB flag, rest reserved
 };
 SNR_IO_STATIC_ASSERT(sizeof(PresentParams) == 32);

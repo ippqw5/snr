@@ -1,6 +1,6 @@
 #include "./session.h"
-#include "gpu/device.h"
 #include "./dispatch.h"
+#include "gpu/device.h"
 #include "shaders/scene_io.h.slang"
 #include "slang-rhi.h"
 #include "slang-rhi/shader-cursor.h"
@@ -27,6 +27,15 @@ void bindConstants(const rhi::ShaderCursor& cursor, const char* name, const void
 
 namespace
 {
+// A swapchain image is commonly an sRGB format, and writing to one applies the encode in hardware, so
+// the present shader must leave linear values rather than encoding twice.
+bool isSrgbFormat(rhi::Format format)
+{
+    using rhi::Format;
+    return format == Format::RGBA8UnormSrgb || format == Format::BGRA8UnormSrgb ||
+           format == Format::BGRX8UnormSrgb;
+}
+
 Params makeParams(const RenderSettings& settings, glm::vec3 environment, uint32_t lightCount)
 {
     const auto& camera = settings.camera;
@@ -53,9 +62,16 @@ Params makeParams(const RenderSettings& settings, glm::vec3 environment, uint32_
 }
 } // namespace
 
-Session::Session(ShaderLibrary& shaders, const Scene& scene, const RenderSettings& settings)
+Session::Session(ShaderLibrary& shaders, const Scene& scene, const RenderSettings& settings, const UploadProgress& progress)
     : m_context(shaders.context()), m_shaders(shaders), m_settings(settings), m_environment(scene.environment),
-      m_scene(std::make_unique<GpuScene>(m_context, scene)), m_film(m_context, settings.imageSize),
+      m_scene(std::make_shared<GpuScene>(m_context, scene, progress)), m_film(m_context, settings.imageSize),
+      m_tonemap(shaders.computePipeline("tonemapMain"))
+{
+}
+
+Session::Session(ShaderLibrary& shaders, const Session& source)
+    : m_context(shaders.context()), m_shaders(shaders), m_settings(source.m_settings),
+      m_environment(source.m_environment), m_scene(source.m_scene), m_film(m_context, m_settings.imageSize),
       m_tonemap(shaders.computePipeline("tonemapMain"))
 {
 }
@@ -99,10 +115,92 @@ RenderResult Session::readback(const DisplaySettings& display)
     return result;
 }
 
+void Session::present(rhi::ITexture* target, const DisplaySettings& display)
+{
+    using namespace rhi;
+    if (!m_presentShaders)
+        m_presentShaders = std::make_unique<ShaderLibrary>(m_context, "present.slang");
+    const Format format = target->getDesc().format;
+    if (!m_present || m_presentFormat != format)
+    {
+        ColorTargetDesc colorTarget = {};
+        colorTarget.format = format;
+
+        RenderPipelineDesc desc = {};
+        desc.targets = &colorTarget;
+        desc.targetCount = 1;
+        desc.primitiveTopology = PrimitiveTopology::TriangleList;
+        desc.rasterizer.cullMode = CullMode::None;
+        m_present = m_presentShaders->renderPipeline("presentVS", "presentFS", desc, std::to_string(int(format)));
+        m_presentFormat = format;
+    }
+
+    const auto    targetSize = target->getDesc().size;
+    PresentParams params = {};
+    params.image = {m_settings.imageSize.width, m_settings.imageSize.height, targetSize.width, targetSize.height};
+    params.config = {display.exposure, isSrgbFormat(format) ? 1.0f : 0.0f, 0, 0};
+
+    auto encoder = m_context.createEncoder();
+    encoder->globalBarrier();
+
+    RenderPassColorAttachment color = {};
+    color.view = target->getDefaultView();
+    color.loadOp = LoadOp::Clear;
+    color.storeOp = StoreOp::Store;
+
+    RenderPassDesc passDesc = {};
+    passDesc.colorAttachments = &color;
+    passDesc.colorAttachmentCount = 1;
+
+    auto* pass = encoder->beginRenderPass(passDesc);
+    if (!pass)
+        throw std::runtime_error("begin present pass failed");
+    auto* root = pass->bindPipeline(m_present);
+    if (!root)
+        throw std::runtime_error("bind present pipeline failed");
+
+    ShaderCursor cursor(root);
+    bindConstants(cursor, "presentParams", &params, sizeof(params));
+    checkRhi(cursor["film"].setBinding(m_film.accumulation()), "bind present film");
+
+    RenderState state = {};
+    state.viewports[0] = Viewport::fromSize(targetSize.width, targetSize.height);
+    state.viewportCount = 1;
+    state.scissorRects[0] =
+        ScissorRect::fromSize(targetSize.width, targetSize.height);
+    state.scissorRectCount = 1;
+    pass->setRenderState(state);
+
+    // One fullscreen triangle covers the whole target; the shader derives the pixel from SV_Position.
+    DrawArguments arguments = {};
+    arguments.vertexCount = 3;
+    arguments.instanceCount = 1;
+    pass->draw(arguments);
+    pass->end();
+
+    m_context.submit(encoder);
+    m_context.checkValidation();
+}
+
 PathSession::PathSession(ShaderLibrary& shaders, const Scene& scene, const RenderSettings& settings)
     : Session(shaders, scene, settings)
 {
     m_trace = shaders.computePipeline("traceMain");
+}
+
+PathSession::PathSession(ShaderLibrary& shaders, const Session& source)
+    : Session(shaders, source), m_trace(shaders.computePipeline("traceMain"))
+{
+}
+
+void PathSession::setSampling(uint32_t targetSamples, uint32_t samplesPerFrame)
+{
+    if (!targetSamples || !samplesPerFrame)
+        throw std::runtime_error("Sample target and batch size must be positive");
+    if (targetSamples < samples())
+        reset();
+    m_settings.samplesPerPixel = targetSamples;
+    m_settings.batchSize = samplesPerFrame;
 }
 
 void PathSession::setIntegrator(const IntegratorSettings& integrator)
@@ -124,34 +222,38 @@ void PathSession::setEnvironment(glm::vec3 environment)
 
 void PathSession::setScene(const Scene& scene)
 {
-    auto replacement = std::make_unique<GpuScene>(m_context, scene);
+    auto replacement = std::make_shared<GpuScene>(m_context, scene);
     m_scene = std::move(replacement);
     m_environment = scene.environment;
     reset();
 }
 
-void PathSession::render()
+bool PathSession::renderStep()
 {
     const uint32_t target = m_settings.samplesPerPixel;
     if (target < samples())
-    {
         throw std::runtime_error("Reset the session before reducing the sample count");
-    }
-
+    if (samples() == target)
+        return false;
     Params params = makeParams(m_settings, m_environment, m_scene->lightCount());
+    params.image.z = samples();
+    params.image.w = std::min(m_settings.batchSize, target - samples());
+    dispatchImage(m_context, m_trace, params, [&](const rhi::ShaderCursor& cursor) {
+        m_scene->bind(cursor);
+        checkRhi(cursor["film"].setBinding(m_film.accumulation()), "bind film");
+    });
+    m_film.addSamples(params.image.w);
+    m_context.checkValidation();
+    return true;
+}
 
-    while (samples() < target)
+void PathSession::render()
+{
+    while (renderStep())
     {
-        params.image.z = samples();
-        params.image.w = std::min(m_settings.batchSize, target - samples());
-        dispatchImage(m_context, m_trace, params, [&](const rhi::ShaderCursor& cursor) {
-            m_scene->bind(cursor);
-            checkRhi(cursor["film"].setBinding(m_film.accumulation()), "bind film");
-        });
-        m_film.addSamples(params.image.w);
-        std::printf("\rSamples: %u/%u", samples(), target);
+        std::printf("\rSamples: %u/%u", samples(), m_settings.samplesPerPixel);
         std::fflush(stdout);
     }
-    m_context.checkValidation();
 }
+
 } // namespace snr

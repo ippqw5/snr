@@ -18,6 +18,9 @@ struct RenderOptions
     uint32_t              spp = 256, batchSize = 16;
     bool                  validation = false;
     std::filesystem::path shaderDir;
+    std::filesystem::path assetDir;
+    std::filesystem::path modelPath;
+    bool                  studio = false;
 };
 
 CameraSettings cameraFromScene(const Scene& scene);

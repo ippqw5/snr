@@ -3,8 +3,8 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
-#include <stdexcept>
 #include <slang-rhi/acceleration-structure-utils.h>
+#include <stdexcept>
 
 namespace snr
 {
@@ -26,14 +26,17 @@ TextureAddressingMode toAddressing(TextureWrap wrap)
 }
 } // namespace
 
-GpuScene::GpuScene(DeviceContext& context, const Scene& scene)
-    : m_lightCount(uint32_t(scene.lights.size()))
+GpuScene::GpuScene(DeviceContext& context, const Scene& scene, const UploadProgress& progress)
+    : m_lightCount(uint32_t(scene.lights.size())),
+      m_triangleLightCount(uint32_t(std::count_if(scene.lights.begin(), scene.lights.end(), [](const Light& light) { return light.info.y == lightTypeTriangle; })))
 {
     if (scene.indices.empty() || scene.primitives.empty() || scene.instances.empty())
     {
         throw std::runtime_error("cannot upload an empty scene to gpu");
     }
 
+    if (progress)
+        progress(0.0f, "Uploading geometry");
     auto* device = context.device();
 
     // The positions and indices are shared with the acceleration structures: the same data the
@@ -63,8 +66,11 @@ GpuScene::GpuScene(DeviceContext& context, const Scene& scene)
     m_normalUvs = upload(device, scene.normalUvs);
     m_occlusionUvs = upload(device, scene.occlusionUvs);
     m_emissiveUvs = upload(device, scene.emissiveUvs);
+    m_transmissionUvs = upload(device, scene.transmissionUvs);
 
-    buildAccelerationStructures(context, scene);
+    buildAccelerationStructures(context, scene, progress);
+    if (progress)
+        progress(0.55f, "Uploading materials");
 
     m_primitives = upload(device, scene.primitives);
     m_instances = upload(device, scene.instances);
@@ -86,6 +92,7 @@ GpuScene::GpuScene(DeviceContext& context, const Scene& scene)
             instance.primitive,
             scene.primitives[instance.primitive].triangleCount,
             material.flags.z == alphaModeBlend,
+            material.flags.z == alphaModeMask,
             glm::vec3(instance.transformRows[0].w, instance.transformRows[1].w, instance.transformRows[2].w),
         });
     }
@@ -98,6 +105,8 @@ GpuScene::GpuScene(DeviceContext& context, const Scene& scene)
     m_textureHandles.reserve(scene.textures.size());
     for (const TextureData& source : scene.textures)
     {
+        if (progress)
+            progress(0.6f + 0.35f * float(m_textures.size()) / float(scene.textures.size()), "Uploading textures");
         TextureDesc desc = {};
         desc.type = TextureType::Texture2D;
         desc.size = {uint32_t(source.width), uint32_t(source.height), 1};
@@ -127,6 +136,8 @@ GpuScene::GpuScene(DeviceContext& context, const Scene& scene)
         m_textureHandles.push_back(handle);
     }
 
+    if (progress)
+        progress(0.95f, "Preparing samplers");
     m_samplers.reserve(scene.samplers.size());
     m_samplerHandles.reserve(scene.samplers.size());
     for (const TextureSampler& source : scene.samplers)
@@ -153,7 +164,7 @@ GpuScene::GpuScene(DeviceContext& context, const Scene& scene)
 
     std::printf(
         "Scene: %zu triangles, %zu vertices, %zu primitives, %zu instances, %zu materials, %zu textures, "
-        "%zu samplers, %zu emissive triangles",
+        "%zu samplers, %zu lights\n",
         scene.indices.size(),
         scene.positions.size(),
         scene.primitives.size(),
@@ -166,7 +177,7 @@ GpuScene::GpuScene(DeviceContext& context, const Scene& scene)
     std::fflush(stdout);
 }
 
-void GpuScene::buildAccelerationStructures(DeviceContext& context, const Scene& scene)
+void GpuScene::buildAccelerationStructures(DeviceContext& context, const Scene& scene, const UploadProgress& progress)
 {
     auto* device = context.device();
 
@@ -181,6 +192,8 @@ void GpuScene::buildAccelerationStructures(DeviceContext& context, const Scene& 
 
     for (size_t i = 0; i < primitiveCount; ++i)
     {
+        if (progress)
+            progress(0.1f + 0.3f * float(i) / float(primitiveCount), "Building mesh acceleration structures");
         const Primitive& primitive = scene.primitives[i];
 
         // AccelerationStructureBuildInput is not default constructible, so it stays a local that
@@ -234,6 +247,8 @@ void GpuScene::buildAccelerationStructures(DeviceContext& context, const Scene& 
         encoder->buildAccelerationStructure(desc, m_blas[i], nullptr, scratchBuffers[i], 0, nullptr);
     }
 
+    if (progress)
+        progress(0.4f, "Building scene acceleration structure");
     // The top-level structure places one instance of a primitive per scene instance.
     std::vector<AccelerationStructureInstanceDescGeneric> instanceDescs(scene.instances.size());
     for (size_t i = 0; i < scene.instances.size(); ++i)
@@ -255,8 +270,8 @@ void GpuScene::buildAccelerationStructures(DeviceContext& context, const Scene& 
         desc.accelerationStructure = m_blas[instance.primitive]->getHandle();
     }
 
-    const auto instanceType = getAccelerationStructureInstanceDescType(device);
-    const auto instanceSize = getAccelerationStructureInstanceDescSize(instanceType);
+    const auto           instanceType = getAccelerationStructureInstanceDescType(device);
+    const auto           instanceSize = getAccelerationStructureInstanceDescSize(instanceType);
     std::vector<uint8_t> instanceBytes(size_t(instanceSize) * instanceDescs.size());
     convertAccelerationStructureInstanceDescs(
         instanceDescs.size(),
@@ -306,6 +321,8 @@ void GpuScene::buildAccelerationStructures(DeviceContext& context, const Scene& 
     // The top-level build references the bottom-level structures, so order them explicitly.
     encoder->globalBarrier();
     encoder->buildAccelerationStructure(topDesc, m_tlas, nullptr, topScratch, 0, nullptr);
+    if (progress)
+        progress(0.5f, "Waiting for GPU acceleration build");
     context.submitAndWait(encoder);
 }
 
@@ -331,6 +348,7 @@ void GpuScene::bindBuffers(const ShaderCursor& root) const
     checkRhi(root["normalUvs"].setBinding(m_normalUvs), "bind normal uvs");
     checkRhi(root["occlusionUvs"].setBinding(m_occlusionUvs), "bind occlusion uvs");
     checkRhi(root["emissiveUvs"].setBinding(m_emissiveUvs), "bind emissive uvs");
+    checkRhi(root["transmissionUvs"].setBinding(m_transmissionUvs), "bind transmission uvs");
     checkRhi(root["indices"].setBinding(m_indices), "bind indices");
     checkRhi(root["primitives"].setBinding(m_primitives), "bind primitives");
     checkRhi(root["instances"].setBinding(m_instances), "bind instances");

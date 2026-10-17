@@ -23,6 +23,7 @@ set(SNR_DEPENDENCIES
     slang-rhi
     glm::glm
     glfw
+    snr_imgui
     Threads::Threads
     ${CMAKE_DL_LIBS}
 )

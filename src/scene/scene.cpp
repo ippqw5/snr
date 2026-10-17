@@ -45,8 +45,7 @@ float wrapCoordinate(float coordinate, TextureWrap wrap)
     {
     case TextureWrap::ClampToEdge:
         return glm::clamp(coordinate, 0.0f, 1.0f);
-    case TextureWrap::MirrorRepeat:
-    {
+    case TextureWrap::MirrorRepeat: {
         const float period = std::floor(coordinate);
         const float fraction = coordinate - period;
         return (int(period) & 1) == 0 ? fraction : 1.0f - fraction;
@@ -63,12 +62,12 @@ vec3 sampleEmissive(const TextureData& texture, const TextureSampler& sampler, v
     if (texture.levels.empty() || texture.width <= 0 || texture.height <= 0)
         return vec3(0.0f);
 
-    const float u = wrapCoordinate(uv.x, sampler.wrapU);
-    const float v = wrapCoordinate(uv.y, sampler.wrapV);
-    const int   x = glm::clamp(int(u * float(texture.width)), 0, texture.width - 1);
-    const int   y = glm::clamp(int(v * float(texture.height)), 0, texture.height - 1);
+    const float                 u = wrapCoordinate(uv.x, sampler.wrapU);
+    const float                 v = wrapCoordinate(uv.y, sampler.wrapV);
+    const int                   x = glm::clamp(int(u * float(texture.width)), 0, texture.width - 1);
+    const int                   y = glm::clamp(int(v * float(texture.height)), 0, texture.height - 1);
     const std::vector<uint8_t>& level = texture.levels.front();
-    const size_t offset = (size_t(y) * size_t(texture.width) + size_t(x)) * 4;
+    const size_t                offset = (size_t(y) * size_t(texture.width) + size_t(x)) * 4;
     if (offset + 3 >= level.size())
         return vec3(0.0f);
 
@@ -107,6 +106,7 @@ void Scene::addQuad(vec3 a, vec3 b, vec3 c, vec3 d, uint32_t material)
         normalUvs.push_back(vec2(0.0f));
         occlusionUvs.push_back(vec2(0.0f));
         emissiveUvs.push_back(vec2(0.0f));
+        transmissionUvs.push_back(vec2(0.0f));
     }
 
     const uint32_t first = uint32_t(indices.size());
@@ -158,9 +158,9 @@ void Scene::buildLights()
     std::vector<float> weights;
     for (Instance& instance : instances)
     {
-        const Primitive&   primitive = primitives[instance.primitive];
+        const Primitive&    primitive = primitives[instance.primitive];
         const GltfMaterial& material = materials[primitive.material];
-        const vec3         emission = vec3(material.emissiveFactor);
+        const vec3          emission = vec3(material.emissiveFactor);
         if (glm::dot(emission, emission) <= 0.0f)
         {
             instance.lightBase = noLight;
@@ -170,9 +170,7 @@ void Scene::buildLights()
         // A texture can leave most of a primitive black, and every extra light dilutes next-event
         // estimation. Keep a triangle only when its texture is not black where it is sampled; a
         // pruned triangle still emits on a direct hit, it is just not in the light list.
-        const bool            textured = material.emissiveTexture >= 0
-                                      && material.emissiveTexture < int(textures.size())
-                                      && !samplers.empty();
+        const bool            textured = material.emissiveTexture >= 0 && material.emissiveTexture < int(textures.size()) && !samplers.empty();
         const TextureData*    texture = textured ? &textures[material.emissiveTexture] : nullptr;
         const TextureSampler* sampler = textured ? &samplers[size_t(material.emissiveSampler) % samplers.size()] : nullptr;
 
@@ -181,10 +179,10 @@ void Scene::buildLights()
         for (uint32_t k = 0; k < primitive.triangleCount; ++k)
         {
             const glm::uvec3& triangle = indices[primitive.firstTriangle + k];
-            const vec2 uv0 = emissiveUvs[primitive.vertexBase + triangle.x];
-            const vec2 uv1 = emissiveUvs[primitive.vertexBase + triangle.y];
-            const vec2 uv2 = emissiveUvs[primitive.vertexBase + triangle.z];
-            vec3 emitted = emission;
+            const vec2        uv0 = emissiveUvs[primitive.vertexBase + triangle.x];
+            const vec2        uv1 = emissiveUvs[primitive.vertexBase + triangle.y];
+            const vec2        uv2 = emissiveUvs[primitive.vertexBase + triangle.z];
+            vec3              emitted = emission;
             if (texture != nullptr)
             {
                 emitted = sampleEmissive(*texture, *sampler, (uv0 + uv1 + uv2) / 3.0f) * emission;
@@ -224,6 +222,18 @@ void Scene::buildLights()
             [](int32_t index) { return index >= 0; }
         );
         instance.lightBase = anyEmitted ? windowBase : noLight;
+    }
+
+    // Analytic lights follow the triangle prefix, leaving triangle-to-light indices unchanged.
+    for (const PointLight& point : pointLights)
+    {
+        Light light = {};
+        light.p0 = vec4(point.position, 0);
+        light.p1 = vec4(point.intensity, 0);
+        light.info = uvec4(0, lightTypePoint, 0, 0);
+        lights.push_back(light);
+        // Triangle weights omit a common pi factor. A point's flux is 4*pi*intensity.
+        weights.push_back(4.0f * glm::dot(point.intensity, vec3(0.2126f, 0.7152f, 0.0722f)));
     }
 
     // Prefix sum of the powers. The shader samples a uniform value in [0, lightCdf.back()) and reads
@@ -284,10 +294,12 @@ void Scene::resetDerived()
     normalUvs.clear();
     occlusionUvs.clear();
     emissiveUvs.clear();
+    transmissionUvs.clear();
     indices.clear();
     primitives.clear();
     instances.clear();
     materials.clear();
+    pointLights.clear();
     lights.clear();
     triangleLights.clear();
     lightCdf.clear();
@@ -304,6 +316,7 @@ void Scene::resetDerived()
     errors.clear();
     warnings.clear();
     currentScene = -1;
+    name.clear();
 }
 
 void addStudio(Scene& scene)
@@ -318,10 +331,10 @@ void addStudio(Scene& scene)
                   center + vec3(4 * r, y - center.y, 4 * r),
                   center + vec3(4 * r, y - center.y, -4 * r),
                   center + vec3(-4 * r, y - center.y, -4 * r), ground);
-    auto light = scene.addMaterial(vec3(0), vec3(9));
-    vec3 p = center + vec3(-r, 3 * r, r);
-    scene.addQuad(p + vec3(-r, 0, -r), p + vec3(r, 0, -r),
-                  p + vec3(r, 0, r), p + vec3(-r, 0, r), light);
+    const vec3 p = center + vec3(-r, 3 * r, r);
+    // Match the former quad's far-field intensity along its normal: radiance * area.
+    // Scaling by r^2 keeps illumination comparable across model sizes.
+    scene.pointLights.push_back({p, vec3(36.0f * r * r)});
     scene.environment = vec3(0.06f);
     scene.finalize();
 }

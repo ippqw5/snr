@@ -2,8 +2,8 @@
 //
 // The vertex shader pulls each triangle's corners out of the scene's index and position arrays -- no
 // vertex or index buffer is bound -- and projects them with the precomputed view-projection rows. The
-// same vertex and fragment pair backs two pipelines: one draws the opaque and MASK instances, the
-// other the glTF BLEND ones, which arrive sorted back to front after them. The fragment shader then
+// OPAQUE entry forces early depth tests; MASK retains late depth writes for alpha discard. BLEND
+// instances arrive sorted back to front after them. The shared fragment shading then
 // evaluates the same glTF material the path tracer does, because material_eval.h.slang is shared
 // between the two, and shades it with emission, an ambient term from the constant environment, and a
 // contribution from the scene's light list that an inline ray query shadows: the fragment shader
@@ -18,6 +18,7 @@
 
 import sampling;
 import bsdf;
+import medium;
 
 #include "scene_io.h.slang"
 
@@ -32,6 +33,7 @@ StructuredBuffer<float2> metallicRoughnessUvs;
 StructuredBuffer<float2> normalUvs;
 StructuredBuffer<float2> occlusionUvs;
 StructuredBuffer<float2> emissiveUvs;
+StructuredBuffer<float2> transmissionUvs;
 StructuredBuffer<uint3> indices;
 StructuredBuffer<Primitive> primitives;
 StructuredBuffer<Instance> instances;
@@ -42,10 +44,9 @@ uniform Texture2D<float4>.Handle images[SNR_MAX_TEXTURES];
 uniform SamplerState.Handle samplers[SNR_MAX_SAMPLERS];
 
 // Per-frame constants for the raster entries, plus the block and buffers the shared tonemap entry
-// point reads (see tonemap.h.slang). presentParams belongs to the windowed present pass below.
+// point reads (see tonemap.h.slang).
 ConstantBuffer<RasterParams>  rasterParams;
 ConstantBuffer<Params>        params;
-ConstantBuffer<PresentParams> presentParams;
 RWStructuredBuffer<float4> film;
 RWStructuredBuffer<float4> display;
 
@@ -90,7 +91,7 @@ RasterVertex rasterVS(uint vertexId : SV_VertexID, uint instanceIndex : SV_Start
     return output;
 }
 
-// Emission, then the environment arriving from every direction, then area-light samples with shadow
+// Emission, then the environment, then sampled area lights and analytic point lights with shadow
 // rays. The environment stays unshadowed because a constant environment has no direction to trace 
 // toward.
 float3 shadeRaster(SurfaceInteraction surface, float3 view, uint2 pixel)
@@ -102,13 +103,13 @@ float3 shadeRaster(SurfaceInteraction surface, float3 view, uint2 pixel)
     // attenuated by Fresnel, the specular lobe returns the Fresnel-tinted environment, and occlusion
     // scales how much of it arrives. Reflecting a constant environment does not blur it, so the
     // roughness only has to enter through the Fresnel term.
-    float3 fresnel = fresnelSchlick(specularReflectance(material), saturate(dot(surface.normal, view)));
+    float3 fresnel = materialFresnel(material, saturate(dot(surface.normal, view)));
     float3 ambient =
-        material.baseColor * (1 - material.metallic) * (1 - fresnel) + fresnel;
+        material.baseColor * (1 - material.metallic) * (1 - material.transmission) * (1 - fresnel) + fresnel;
     radiance += rasterParams.environment.rgb * material.occlusion * ambient;
 
     const uint kLightSamples = 32;
-    uint       lightCount = rasterParams.counts.x;
+    uint       lightCount = rasterParams.counts.z; // Only sample the triangle-light CDF prefix.
     float      total = lightCdf[lightCount];
     if (kLightSamples > 0 && total > 0)
     {
@@ -157,6 +158,24 @@ float3 shadeRaster(SurfaceInteraction surface, float3 view, uint2 pixel)
             radiance += bsdf.value * emission * cosine / (pdf * float(kLightSamples));
         }
     }
+    // Each point light is evaluated exactly once, independently of area-light sampling. There is
+    // no emitter-position integral: intensity / distance^2 is the incident radiance weight.
+    for (uint index = lightCount; index < rasterParams.counts.x; ++index)
+    {
+        Light light = lights[index];
+        float3 delta = light.p0.xyz - surface.position;
+        float distanceSquared = dot(delta, delta);
+        if (distanceSquared <= 1e-12) continue;
+        float3 wi = delta * rsqrt(distanceSquared);
+        float cosine = dot(surface.normal, wi);
+        if (cosine <= 0) continue;
+        float3 origin = offsetRay(surface.position, surface.geometricNormal);
+        float3 shadowDelta = light.p0.xyz - origin;
+        float distance = length(shadowDelta);
+        if (distance <= 1e-4 || occluded(sceneBVH, origin, shadowDelta / distance, distance - 1e-4)) continue;
+        BsdfEvaluation bsdf = evaluateBsdf(material, surface.normal, view, wi);
+        radiance += bsdf.value * light.p1.rgb * cosine / distanceSquared;
+    }
     return radiance;
 }
 
@@ -180,6 +199,71 @@ float3 instanceColor(uint id)
 // The debug views: one channel of the pass drawn as a colour instead of the shaded image. They are
 // display values, not radiance, so they are read through the shared tone map -- the HDR output holds
 // them as written, while the PNG shows them tone mapped like any other frame.
+bool tracePreviewSurface(float3 origin, float3 direction, out SurfaceInteraction surface, out uint materialId, out float distance)
+{
+    surface = {}; materialId = 0; distance = 0;
+    RayDesc ray;
+    ray.Origin = origin; ray.Direction = direction; ray.TMin = 0; ray.TMax = 1e30;
+    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> query;
+    query.TraceRayInline(sceneBVH, RAY_FLAG_NONE, 0xff, ray);
+    while (query.Proceed())
+    {
+        if (query.CandidateType() != CANDIDATE_NON_OPAQUE_TRIANGLE) continue;
+        Instance instance = instances[query.CandidateInstanceID()];
+        Triangle triangle = triangleAt(instance, query.CandidatePrimitiveIndex());
+        GltfMaterial material = materials[instance.material];
+        if (acceptSurfaceHit(instance, triangle, material, query.CandidateTriangleBarycentrics(), direction))
+            query.CommitNonOpaqueTriangleHit();
+    }
+    if (query.CommittedStatus() != COMMITTED_TRIANGLE_HIT) return false;
+    Instance instance = instances[query.CommittedInstanceID()];
+    Triangle triangle = triangleAt(instance, query.CommittedPrimitiveIndex());
+    materialId = instance.material;
+    distance = query.CommittedRayT();
+    surface = surfaceAt(images, samplers, instance, triangle, materials[materialId],
+                        query.CommittedTriangleBarycentrics(), -direction, -1);
+    return true;
+}
+
+float3 shadeTransmissivePreview(SurfaceInteraction surface, uint materialId, float3 view, uint2 pixel)
+{
+    MediumState media = {};
+    float3 radiance = 0;
+    float3 throughput = exp(-segmentAbsorption(media,surface.material,surface.frontFace)*
+                            length(surface.position-rasterParams.eye.xyz));
+    uint rng = hash32(pixel.x ^ hash32(pixel.y) ^ 0x7193u);
+    for (uint boundary = 0; boundary < 12; ++boundary)
+    {
+        setMediumEta(surface.material, surface.frontFace, media, materialId);
+        radiance += throughput * shadeRaster(surface, view, pixel);
+        SurfaceMaterial m = surface.material;
+        float transmission = m.transmission * (1-m.metallic);
+        if (transmission <= 0) break;
+        float3 h = isSmooth(m) ? surface.normal : sampleGgxNormal(surface.normal,view,max(1e-4,m.roughness*m.roughness),rng);
+        float3 direction;
+        if (m.volume) direction = refract(-view,h,m.eta);
+        else
+        {
+            float3 reflected = reflect(-view,h);
+            direction = reflected - 2*dot(reflected,surface.normal)*surface.normal;
+        }
+        if (dot(direction,surface.geometricNormal)>=0 || dot(direction,direction)<1e-8) break;
+        float f = dielectricFresnel(abs(dot(view,h)),m.eta);
+        throughput *= m.baseColor * transmission * (1-f) * (m.volume ? m.eta*m.eta : 1);
+        if (!crossMedium(media,m,surface.frontFace,materialId)) break;
+        float3 origin = offsetRay(surface.position,-surface.geometricNormal);
+        SurfaceInteraction next; uint nextMaterial; float distance;
+        if (!tracePreviewSurface(origin,direction,next,nextMaterial,distance))
+        {
+            radiance += throughput * rasterParams.environment.rgb;
+            break;
+        }
+        throughput *= exp(-segmentAbsorption(media,next.material,next.frontFace)*distance);
+        surface = next; materialId = nextMaterial; view = -direction;
+    }
+    return radiance;
+}
+
 float3 debugColor(uint view, uint objectId, SurfaceInteraction surface, float3 worldPosition)
 {
     if (view == rasterDebugDepth)
@@ -207,12 +291,7 @@ struct RasterOutput
     uint   objectId : SV_Target1;
 };
 
-[shader("fragment")]
-RasterOutput rasterFS(
-    RasterPixel input,
-    uint        primitiveIndex : SV_PrimitiveID,
-    float3      barycentric : SV_Barycentrics
-)
+RasterOutput shadeRasterPixel(RasterPixel input, uint primitiveIndex, float3 barycentric)
 {
     Instance      instance = instances[input.instanceIndex];
     Primitive     primitive = primitives[instance.primitive];
@@ -255,7 +334,9 @@ RasterOutput rasterFS(
     uint   objectId = input.instanceIndex + 1;
     uint   debugView = rasterParams.counts.y;
     float3 color = debugView == rasterDebugShaded
-                       ? shadeRaster(surface, view, uint2(input.pixelPosition.xy))
+                       ? (surface.material.transmission > 0
+                              ? shadeTransmissivePreview(surface, instance.material, view, uint2(input.pixelPosition.xy))
+                              : shadeRaster(surface, view, uint2(input.pixelPosition.xy)))
                        : debugColor(debugView, objectId, surface, input.worldPosition);
 
     RasterOutput output;
@@ -264,32 +345,20 @@ RasterOutput rasterFS(
     return output;
 }
 
-// Fullscreen triangle for the windowed present pass. Three vertices at (-1,-1), (3,-1), (-1,3) cover
-// the clip-space square with one primitive, so a frame costs one draw and no index buffer.
-struct PresentVertex
+// OPAQUE fragments cannot discard. Test and write depth before texture evaluation, transmission
+// traversal and the area-light loop, so hidden surfaces (including the studio floor) do no shading.
+[shader("fragment")]
+[earlydepthstencil]
+RasterOutput rasterOpaqueFS(RasterPixel input, uint primitiveIndex : SV_PrimitiveID,
+                            float3 barycentric : SV_Barycentrics)
 {
-    float4 position : SV_Position;
-};
-
-[shader("vertex")]
-PresentVertex presentVS(uint vertexId : SV_VertexID)
-{
-    float2 corner = float2((vertexId << 1) & 2, vertexId & 2);
-    PresentVertex output;
-    output.position = float4(corner * 2 - 1, 0, 1);
-    return output;
+    return shadeRasterPixel(input, primitiveIndex, barycentric);
 }
 
-// Tone maps the film into a swapchain image. SV_Position names the pixel directly, so the film is
-// read at the same texel the fragment covers and no bounds check is needed: the triangle covers
-// exactly the target. The film holds the same linear radiance headless readback tone maps, so the
-// windowed image matches the offscreen one for the same camera and exposure.
+// MASK retains late depth writes, and BLEND retains normal depth testing without depth writes.
 [shader("fragment")]
-float4 presentFS(PresentVertex input)
+RasterOutput rasterFS(RasterPixel input, uint primitiveIndex : SV_PrimitiveID,
+                      float3 barycentric : SV_Barycentrics)
 {
-    uint   pixel = uint(input.position.y) * presentParams.image.x + uint(input.position.x);
-    float4 sum = film[pixel];
-    float3 color = tonemapCore(sum.rgb / sum.w, presentParams.config.x);
-    // An sRGB target format encodes on write, so it receives linear values; otherwise encode here.
-    return float4(presentParams.config.y != 0 ? color : linearToSrgb(color), 1);
+    return shadeRasterPixel(input, primitiveIndex, barycentric);
 }

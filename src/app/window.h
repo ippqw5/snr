@@ -25,13 +25,16 @@ public:
 
     // Processes pending events, updates the surface on a resize and refreshes the input state.
     // Returns false once the window should close.
-    bool pump();
+    bool pump(bool captureKeyboard = false);
 
     // Framebuffer size in pixels; zero while the window is minimized.
     ImageSize framebufferSize() const
     {
         return m_size;
     }
+
+    // Requests a drawable size in pixels. Applied at the next pump before acquiring an image.
+    void requestFramebufferSize(ImageSize size);
 
     // Acquires the next swapchain image, or null when the surface is unconfigured or has none ready.
     rhi::ComPtr<rhi::ITexture> acquireImage();
@@ -55,6 +58,10 @@ public:
     {
         return m_leftButton;
     }
+    GLFWwindow* nativeHandle() const
+    {
+        return m_window;
+    }
     bool rightButton() const
     {
         return m_rightButton;
@@ -70,6 +77,7 @@ private:
     GLFWwindow*                m_window = nullptr;
     rhi::ComPtr<rhi::ISurface> m_surface;
     ImageSize                  m_size{0, 0};
+    std::optional<ImageSize>   m_requestedSize;
     bool                       m_vsync;
 
     glm::vec2               m_cursor{0, 0};
