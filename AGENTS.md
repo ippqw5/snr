@@ -34,3 +34,25 @@ These instructions apply to the entire repository. Follow them when modifying co
 - Consult its path tracer and shared material evaluation for material semantics; its rasterizer is a preview approximation.
 - Compare against the Khronos extension specifications. Adapt the implementation to this repository's shared C++/Slang layouts and rendering architecture.
 - Treat the reference repository as read-only unless changes there are explicitly requested.
+
+## Documentation and development workflow
+
+- Use English for documentation and diagram labels, retaining exact code identifiers.
+- Each topic has one primary home: `README.md` for build, usage and verification;
+  `docs/rendering-flow.md` for execution, ownership, output and reset rules;
+  `docs/architecture.md` for code locations, layouts, binding and shading details.
+  Link to the owning section instead of repeating its explanation.
+- Before editing, read the relevant guide section and implementation, including callers.
+  Identify affected data owners, CPU/GPU boundaries and invalidated results. Verify contracts
+  against code; do not treat an architecture description as proof of current behavior.
+- When documented behavior or design reasons change, update their owning section and affected
+  diagrams in the same change. Remove or merge superseded explanations. Local refactors do not
+  need a documentation log. Keep implemented behavior separate from the README roadmap.
+- Follow the build and runtime checks in `README.md#verification`. For UI or accumulation changes,
+  exercise the affected transitions from the rendering guide's reset table. Match verification
+  to the change; documentation-only work needs link and diagram checks, not a renderer build.
+- Diagram source and regeneration instructions live in `docs/diagrams/README.md`.
+  Keep generated SVGs with their sources. This optional local tool is outside CMake and must
+  not download dependencies.
+- Report the behavior change, reason, effect on data flow or lifetime, and checks actually run.
+  Identify remaining limitations and checks that were not run.

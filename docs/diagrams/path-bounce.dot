@@ -1,0 +1,28 @@
+digraph path_bounce {
+  graph [rankdir=TB, bgcolor="#ffffff", pad=0.28, nodesep=0.30, ranksep=0.28,
+         fontname="Arial", fontsize=18, labelloc=t,
+         label="03  The path loop inside one sample\nThe entire path runs in one GPU compute thread"];
+  node [shape=box, style="rounded,filled", fillcolor="#e8f1fb", color="#94a3b8",
+        fontcolor="#17283b", fontname="Arial", fontsize=13, margin="0.16,0.09"];
+  edge [color="#60758a", fontcolor="#334e68", fontname="Arial", fontsize=11, arrowsize=0.7];
+  start [label="Camera ray + RNG\nradiance = 0, throughput = 1"];
+  query [label="traceScene(): hardware ray query\nHit a surface in the TLAS?"];
+  surface [label="surfaceAt(): resolve the surface\nAttributes / textures / normals / material / ray cone"];
+  emission [label="Apply segment absorption and interface IORs\nCollect emission with MIS weighting when needed"];
+  nee [label="If NEE is enabled and lights are sampleable\nSelect light → shadow ray → evaluate BSDF\nCollect visible direct light (MIS for area lights)"];
+  bsdf [label="sampleBsdf(): choose the next direction\nInvalid direction / zero weight / failed medium crossing ends the path"];
+  state [label="Valid path: update medium and throughput\nRecord PDF / NEE state, offset the origin\nUpdate the ray cone"];
+  stop [label="Russian roulette at bounce >= 3\nCompensate survivors; below the depth limit?"];
+  miss [label="Miss: collect environment light\nradiance += throughput × environment", fillcolor="#edf5ed"];
+  result [label="Return radiance to traceMain()\nAdd this sample to Film: float4(radiance, 1)", fillcolor="#edf5ed"];
+  start -> query;
+  query -> surface [label="Hit"];
+  query -> miss [label="Miss"];
+  surface -> emission -> nee -> bsdf;
+  bsdf -> state [label="Valid"];
+  bsdf -> result [label="Terminate"];
+  state -> stop;
+  stop -> query [style=dashed, label="Next bounce", constraint=false];
+  stop -> result [label="Terminate / depth limit"];
+  miss -> result;
+}

@@ -1,0 +1,24 @@
+digraph scene_ownership {
+  graph [rankdir=TB, bgcolor="#ffffff", pad=0.28, nodesep=0.28, ranksep=0.38,
+         fontname="Arial", fontsize=18, labelloc=t,
+         label="01  Scene data and ownership\nUpload once, share the snapshot, keep separate films"];
+  node [shape=box, style="rounded,filled", fillcolor="#f1f5f9", color="#94a3b8",
+        fontcolor="#17283b", fontname="Arial", fontsize=13, margin="0.16,0.10"];
+  edge [color="#60758a", fontcolor="#334e68", fontname="Arial", fontsize=11, arrowsize=0.7];
+  source [label="glTF file\nGltfImporter → Scene"];
+  derived [label="CPU Scene\nGeometry / instances / materials / textures\nfinalize(): lights, CDF and bounds\nImporter: camera framing"];
+  inspect [label="--inspect\nInspect CPU data without a GPU", fillcolor="#f3f6f3"];
+  snapshot [label="GpuScene: GPU resource snapshot\nAttribute buffers / textures / samplers\nBLAS per primitive + TLAS over instances", fillcolor="#e8f1fb"];
+  raster [label="RasterSession\nCPU management object"];
+  path [label="PathSession\nCPU management object"];
+  rasterfilm [label="Own Film\nGPU accumulation / display"];
+  pathfilm [label="Own Film\nGPU accumulation / display"];
+  source -> derived [label="Import and derive"];
+  derived -> snapshot [label="Upload and build; retain no Scene reference"];
+  derived -> inspect;
+  {rank=same; raster; path;}
+  snapshot -> raster [dir=back, style=dashed, label="Shared reference"];
+  snapshot -> path [dir=back, style=dashed, label="Shared reference"];
+  raster -> rasterfilm [label="Owns"];
+  path -> pathfilm [label="Owns"];
+}

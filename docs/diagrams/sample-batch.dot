@@ -1,0 +1,25 @@
+digraph sample_batch {
+  graph [rankdir=TB, bgcolor="#ffffff", pad=0.28, nodesep=0.32, ranksep=0.34,
+         fontname="Arial", fontsize=18, labelloc=t,
+         label="02  One sampling batch and two output paths\nThe batch covers the image; each thread owns one pixel"];
+  node [shape=box, style="rounded,filled", fillcolor="#f1f5f9", color="#94a3b8",
+        fontcolor="#17283b", fontname="Arial", fontsize=13, margin="0.16,0.10"];
+  edge [color="#60758a", fontcolor="#334e68", fontname="Arial", fontsize=11, arrowsize=0.7];
+  step [label="CPU  PathSession::renderStep()\nBelow target: choose this batch's SPP"];
+  params [label="CPU  Pack Params and bind resources\nSample base / batch count / camera / integrator\nGpuScene + current Film"];
+  dispatch [label="CPU  dispatchImage()\nbarrier → compute pass → dispatch\nSubmit and wait for the GPU"];
+  trace [label="GPU  traceMain()\nEach thread loops over batch samples\nEach sample calls tracePath()", fillcolor="#e8f1fb"];
+  film [label="GPU  Film accumulation\nPer pixel: (radiance sum, count)", fillcolor="#e8f1fb"];
+  count [label="CPU  Wait completes; addSamples(batch)\nContinue sampling or use the current Film"];
+  window [label="GUI / GPU  Session::present()\nRead and scale accumulation\nTone map + target-dependent encoding", fillcolor="#edf5ed"];
+  export [label="Export / GPU  Session::readback()\ntonemapMain → display buffer", fillcolor="#edf5ed"];
+  screen [label="CPU  Draw UI + Window::present()\nDisplay without full-image CPU readback", fillcolor="#edf5ed"];
+  files [label="CPU  Film::readback() + saveImages()\nPNG: quantize display / HDR: linear mean", fillcolor="#edf5ed"];
+  step -> params -> dispatch -> trace -> film -> count;
+  count -> step [style=dashed, label="Next batch", constraint=false];
+  count -> window [label="Window frame"];
+  count -> export [label="Headless output"];
+  {rank=same; window; export;}
+  window -> screen;
+  export -> files;
+}
