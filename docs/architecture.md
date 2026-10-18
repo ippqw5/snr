@@ -2,17 +2,16 @@
 
 After [building and running the project](../README.md#building), read this document from top to
 bottom to understand how a scene becomes an image. It assumes basic C++ and graphics knowledge;
-project-specific objects are introduced before their execution details.
+project-specific objects are introduced before their role in rendering.
 
-This document describes the current implementation. The [roadmap](../README.md#roadmap) records
-planned work. Field layouts, shader algorithms and pipeline settings live in the topic references
-linked below.
+This document describes the current architecture. The [roadmap](../README.md#roadmap) records
+planned work.
 
 - [System overview](#system-overview)
 - [Core objects](#core-objects)
 - [From scene to image](#from-scene-to-image)
 - [State changes and resource lifetime](#state-changes-and-resource-lifetime)
-- [Code map and further reading](#code-map-and-further-reading)
+- [Code map](#code-map)
 
 ## System overview
 
@@ -68,7 +67,7 @@ a top-level structure (TLAS) assembles them using instance transforms.
 
 ### CPU preparation
 
-`Scene::loadGltf()` delegates file reading, material import and geometry import to `GltfImporter`.
+`GltfImporter` handles file reading, material import and geometry import.
 `Scene` holds geometry attribute arrays, primitives, instances, materials, textures and lights,
 along with the camera and bounds. The importer retains the parsed glTF model so it can derive
 another glTF scene without reading the file again.
@@ -94,12 +93,21 @@ a new or replacement snapshot is required. Sessions manage their camera, integra
 environment values separately, with dedicated setters. Integrator settings control light transport,
 including the bounce limit, random seed and next-event estimation (NEE), which samples direct light.
 
-See [GPU resources](reference/gpu-resources.md) for layouts, build inputs and bindings.
+See [GPU resources](reference/gpu-resources.md) for the shared data and resource contracts.
 
 ### Rendering into Film
 
-Each Film pixel stores **`(radiance sum.rgb, sample count)`**. Radiance is the linear light value
+Each Film pixel stores a **radiance sum and sample count**. Radiance is the linear light value
 computed for a sample. Display and export divide the sum by the count to obtain the mean.
+In [traceMain](../shaders/pathtracer.slang), each sample contributes:
+
+```slang
+sum += float4(tracePath(params.eye.xyz, direction, pixelAngle, rng), 1);
+```
+
+Here, `sum.rgb` accumulates radiance and `sum.w` counts samples. This representation lets rendering
+extend the Film while display and export read its current mean.
+
 The two renderers produce this same representation in different ways:
 
 | Renderer | Work that fills Film | Result after the work completes |
@@ -116,8 +124,8 @@ transmission queries use the same TLAS as path tracing.
 
 After the pass, a texture-to-buffer copy places linear color into Film with a per-pixel count of one.
 The CPU waits for submission to complete before recording one Film sample. Each Raster render
-replaces its previous image. Pipeline variants, alpha handling and debug channels are explained in
-the [rasterizer reference](reference/rasterizer.md).
+replaces its previous image. The [Raster design](reference/rasterizer.md) explains shared geometry,
+visibility and the preview's approximations.
 
 #### Path-tracing batch
 
@@ -127,55 +135,47 @@ There are three nested loops. Understanding their boundaries matters more than m
 
 | Loop | Where it runs | Work per iteration |
 | --- | --- | --- |
-| Sampling batch | CPU: `PathSession::renderStep()` | Dispatch one compute pass over the entire image |
-| Samples for one pixel | GPU: the `i` loop in `traceMain()` | A thread computes this batch's camera samples sequentially |
-| Bounces for one sample | GPU: the `bounce` loop in `tracePath()` | Accumulate radiance along the path until termination |
+| Sampling batch | CPU: `PathSession::renderStep()` | Schedule GPU work over the entire image |
+| Samples for one pixel | GPU: `traceMain()` | Compute this batch's camera samples |
+| Bounces for one sample | GPU: `tracePath()` | Collect light along the path until termination |
 
-**One displayed frame is not one sample.** The GUI calls renderStep at most once per frame, and a
-batch can contain multiple samples per pixel (SPP). For headless output, `PathSession::render()`
-repeats renderStep until it reaches the target.
-
-**CPU parameters, bindings and submission.**
+**One displayed frame is not one sample.** The GUI advances at most one batch per frame, and a
+batch can contain multiple samples per pixel (SPP). Headless rendering repeats batches until it
+reaches the target.
 
 Suppose Film already contains 8 SPP, the target is 10 SPP, and the batch size is 4 SPP:
 
-1. `renderStep()` chooses `min(4, 10 - 8) = 2` samples for this batch.
-2. `makeParams()` packs camera, environment and integrator values.
-   `Params.image = (width, height, 8, 2)`: `.z` is the starting sample index and `.w` is the batch count.
-3. `dispatchImage()` creates an encoder, inserts a barrier, begins a compute pass and binds the
-   `traceMain` pipeline.
-4. `bindParams()` binds constants, `GpuScene::bind()` binds scene resources, and the caller binds
-   Film accumulation. Binding establishes shader access; it does not upload the scene again.
-5. Dispatch covers `ceil(width / 8) × ceil(height / 8)` thread groups, each containing `8 × 8` threads.
-6. After ending the pass and inserting a barrier, `submitAndWait()` submits and waits for the
-   graphics queue. Only then does `Film::addSamples(2)` advance the CPU count to 10.
+1. The CPU chooses the remaining 2 samples per pixel and prepares the rendering state.
+2. GPU threads read the shared scene and compute those camera samples for their pixels.
+3. Each thread adds the samples' radiance and count to its Film pixel.
+4. The CPU waits for completion, then advances its completed sample count from 8 to 10.
 
-Every compute batch currently includes a CPU wait. Multiple sampling batches are not kept
-asynchronously in flight.
+The handoff in [PathSession::renderStep()](../src/render/session.cpp) carries the starting sample
+index in `Params.image.z` and this batch's count in `Params.image.w`:
 
-**GPU pixel work.**
+```cpp
+params.image.z = samples();
+params.image.w = std::min(m_settings.batchSize, target - samples());
+```
 
-`traceMain()` rejects threads outside the image extent, then obtains the pixel's accumulation.
-For each sample it seeds the RNG from pixel, sample index and seed, jitters the location within
-the pixel, generates a ray from the camera basis and calls tracePath.
-It adds `float4(radiance, 1)` for each sample and writes the pixel once after the batch loop.
+The GPU scene is reused across batches. Every compute batch includes a CPU wait, so multiple
+sampling batches are not kept asynchronously in flight.
 
-For the per-sample bounce loop and shading algorithms, continue to [light transport](reference/light-transport.md).
+For the per-sample transport model, continue to [light transport](reference/light-transport.md).
 
-The CPU Film counter schedules the next batch; each GPU pixel's `.w` records its actual count.
-`saveImages()` checks that the GPU counts agree with the CPU count when exporting.
+The CPU Film counter schedules batches; GPU pixels retain their accumulated sample counts.
+File export checks that the counts agree before producing an image.
 
 ### Presentation and file output
 
 | Output | GPU work | CPU work |
 | --- | --- | --- |
-| GUI window | `Session::present()` draws a fullscreen triangle, reading, scaling and tone mapping accumulation into the swapchain image | Draw UI, then call `Window::present()`; regular display does not read the full image back |
-| Headless files | `Session::readback()` dispatches `tonemapMain` into Film's display buffer | `Film::readback()` reads accumulation and display; `saveImages()` writes PNG and HDR |
+| GUI window | Read, fit and tone map Film into a swapchain image | Draw UI and present; regular display does not read the full image back |
+| Headless files | Tone map Film into its display buffer | Read linear and display images into RenderResult, then write PNG and HDR |
 
-Both paths use `tonemapCore` for exposure and Reinhard mapping.
-The GUI relies on hardware encoding for sRGB swapchain targets, and presentFS explicitly encodes
-other target formats. Current `tonemapMain` only writes tone-mapped values into display;
-`saveImages()` quantizes them directly to PNG bytes without adding sRGB encoding.
+Both paths share exposure and Reinhard tone mapping.
+The GUI uses hardware encoding for sRGB swapchain targets and shader encoding for other target
+formats. PNG export quantizes the tone-mapped display values without adding sRGB encoding.
 Sharing tone mapping therefore does not imply identical window and PNG encoding.
 HDR comes from averaged linear accumulation, without display exposure or tone mapping.
 
@@ -183,7 +183,7 @@ Headless rendering writes both the requested `.png` and a `.hdr` with the same b
 The GUI does not save files on exit. `RenderResult` owns the CPU copies used for file output;
 the headless renderer releases its Session before calling `saveImages()`.
 
-For display-pipeline and window implementation details, see [presentation](reference/presentation.md).
+See [presentation](reference/presentation.md) for the display and window boundaries and code entry points.
 
 ## State changes and resource lifetime
 
@@ -199,8 +199,8 @@ For display-pipeline and window implementation details, see [presentation](refer
 | `RenderResult` | Readback caller | Owns CPU vectors independent of subsequent rendering and GPU resource lifetime |
 
 Interactive mode creates a `RasterSession` first. The first switch to Path tracing creates a
-`PathSession` through `Session(shaders, source)`, sharing the GpuScene while allocating its own
-Film. Switching renderers therefore reuses geometry, textures and acceleration structures without
+`PathSession`, sharing the GpuScene while allocating its own Film. Switching renderers therefore
+reuses geometry, textures and acceleration structures without
 mixing the two renderers' pixel results. **Raster also needs the TLAS**: fragment shaders use ray
 queries for shadows and transmission preview.
 
@@ -223,9 +223,9 @@ conditions remain compatible.
 | Call `PathSession::setScene()` | Build a new snapshot for this session | Reset; other sessions retain their original snapshot |
 
 **Reset currently only sets the CPU sample count to zero; it does not immediately clear GPU buffers.**
-On the next batch, `Params.image.z == 0` makes traceMain initialize its local sum to zero and
-overwrite each pixel. Other batches read the previous accumulation.
-If no rendering follows a reset, the old bytes remain in the buffer.
+The first batch after a reset replaces the previous accumulation. Later batches extend it.
+`traceMain()` starts a fresh sum when the starting sample index, `Params.image.z`, is zero.
+Until rendering resumes, old buffer contents remain allocated but are no longer valid samples.
 
 Even when paused, the GUI computes one fresh batch after reset so the displayed image matches
 the current state. These rules live in the
@@ -251,14 +251,15 @@ A failed import preserves the working scene and camera.
 
 Dear ImGui's detached panels each have a GLFW window and a slang-rhi surface. Release the native
 surface before destroying its GLFW window. Platform windows continue updating while the main
-surface is minimized; the GUI loop waits on the queue before shutdown. Window fitting and callback
-implementation details are in the [presentation reference](reference/presentation.md).
+surface is minimized; the GUI loop waits on the queue before shutdown.
+See [presentation](reference/presentation.md) for window fitting, platform callbacks and code entry points.
 
-## Code map and further reading
+## Code map
 
 Use this map to locate the implementation after following the execution above.
+For the complete documentation directory, see the [README index](../README.md#documentation).
 
-| Implementation | Responsibility |
+| Source | Responsibility |
 | --- | --- |
 | [main.cpp](../src/main.cpp) | CLI parsing, initial model selection and `--inspect` |
 | [gltf_importer.cpp](../src/scene/gltf_importer.cpp), [scene.cpp](../src/scene/scene.cpp) | Import and CPU scene derivation |
@@ -279,16 +280,3 @@ Use this map to locate the implementation after following the execution above.
 | [sampling.slang](../shaders/sampling.slang) | RNG, sampling distributions, MIS heuristic and ray offsets |
 | [scene_io.h.slang](../shaders/scene_io.h.slang) | Shared host/device records |
 | [Dependencies.cmake](../cmake/Dependencies.cmake) | Local dependency integration |
-
-### Topic references
-
-| Task | Read next |
-| --- | --- |
-| Change import or CPU scene representation | [Scene data](reference/scene-data.md) |
-| Change shared records, uploads, AS builds or bindings | [GPU resources and host/device contracts](reference/gpu-resources.md) |
-| Change material fields end to end | [Scene data](reference/scene-data.md), [shared layouts](reference/gpu-resources.md#hostdevice-contract), then [light transport](reference/light-transport.md) |
-| Understand one path or change BSDF / light sampling / media | [Light transport](reference/light-transport.md) |
-| Change Raster pipeline state or fragment shading | [Rasterizer implementation](reference/rasterizer.md) |
-| Change display fitting, swapchain integration or detached panels | [Presentation implementation](reference/presentation.md) |
-| Test renderer changes | [Renderer tests](../tests/README.md) |
-| Maintain the diagrams | [Diagram sources and regeneration](diagrams/README.md) |

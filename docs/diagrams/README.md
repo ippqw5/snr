@@ -4,7 +4,7 @@ These SVGs illustrate the [architecture](../architecture.md) and the
 [light-transport reference](../reference/light-transport.md).
 Edit the matching DOT file, then regenerate the image.
 
-| Diagram | Question answered | Implementation to check |
+| Diagram | Question answered | Code entry points |
 | --- | --- | --- |
 | `system-overview.dot` | What are the main modules and how do they delegate work? | main, render, Session, Scene, DeviceContext, ShaderLibrary, saveImages |
 | `scene-ownership.dot` | Where is data prepared, and who owns it after upload? | Scene, GpuScene, Session, renderWindowed |
@@ -24,9 +24,8 @@ sources so readers do not need Graphviz.
 An individual image can also be generated with
 `dot -Tsvg docs/diagrams/sample-batch.dot -o docs/diagrams/sample-batch.svg`.
 
-Open generated images to check labels, connectors and branches. Verify that the prose, identifiers
-and execution order agree with the implementation. These are logical flows, not timing diagrams.
+Open generated images to check labels, connectors and branches. Check the architecture against
+the linked code. The diagrams show responsibilities, data ownership and logical execution.
 Dashed arrows mean shared references in `scene-ownership`, another batch in `sample-batch`,
-and another bounce in `path-bounce`. `system-overview` shows work delegation and result transfer,
-rather than include dependencies. Full text labels preserve meaning independently of color; color only helps distinguish
-CPU management, GPU execution and output.
+and another bounce in `path-bounce`. `system-overview` shows work delegation and result transfer.
+Text labels describe the relationships; color distinguishes CPU management, GPU execution and output.

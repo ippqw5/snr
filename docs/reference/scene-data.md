@@ -1,57 +1,45 @@
 # Scene data
 
-Read this after the architecture overview when changing scene import or CPU data representation.
-This reference defines geometry addressing, attribute arrays, transforms and texture registration.
+`Scene` is the CPU representation shared by import, inspection and GPU upload. It separates
+reusable geometry from world-space placement and prepares the data that both renderers consume.
+Start with the [architecture](../architecture.md#core-objects) for its place in the rendering flow.
 
-[Architecture](../architecture.md) · [Project README](../../README.md)
+## Geometry and instances
 
-## Geometry concepts
-
-Keep these three geometry concepts distinct:
-
-| Concept | Meaning here | GPU use |
-| --- | --- | --- |
-| Vertex / triangle | Vertex attribute arrays and triangles containing three local vertex indices | Shaders fetch attributes; AS construction reads positions / indices |
-| `Primitive` | A triangle range with one material and its own vertex window | One BLAS is built per primitive |
-| `Instance` | A transformed placement of a primitive in the world | The TLAS places instances; hits resolve geometry and material through them |
-
-A BLAS accelerates intersection with one primitive. The TLAS assembles those BLASes using instance
-transforms to represent the scene. Triangle indices are relative to the primitive's `vertexBase`;
-they cannot be used directly as global vertex indices.
-
-## Scene fields
-
-`Scene` ([scene.h](../../src/scene/scene.h)) is the entire CPU-side model. Geometry is stored as
-**typed arrays in structure-of-arrays form**, not as per-triangle records:
-
-| Field | Meaning |
+| Concept | Responsibility |
 | --- | --- |
-| `positions`, `normals` | One `vec3` per vertex. `normals` is zero when the source had no usable normal. |
-| `baseColorUvs`, `metallicRoughnessUvs`, `normalUvs`, `occlusionUvs`, `emissiveUvs`, `transmissionUvs` | One `vec2` per vertex, one array per material texture slot because every slot may use a different UV set. |
-| `indices` | One `uvec3` per triangle. The ids are **local to the owning primitive's vertex window**. |
-| `primitives` | `Primitive` records: one triangle range with a single material. |
-| `instances` | `Instance` records: a transform plus the primitive it places. |
-| `materials`, `lights` | `GltfMaterial` and world-space `Light` records. |
-| `triangleLights`, `lightCdf` | Per-triangle light remap and the light power distribution; see [light sampling](light-transport.md#light-sampling). |
-| `textures`, `samplers` | `TextureData` (full mip chain, RGBA8) and `TextureSampler` states. |
-| `eye`, `target`, `up`, `fov`, `environment`, `lower`, `upper` | Camera and derived extents. |
-| `errors`, `warnings`, `currentScene` | Diagnostics and provenance. |
+| Vertex attributes and triangles | Describe a surface in object space |
+| `Primitive` | Associate a triangle range and its vertex window with one material |
+| `Instance` | Place a primitive in the world through a transform |
 
-**Per-primitive vertex window.** `buildPrimitive` appends each primitive's referenced vertices as one
-contiguous run and rewrites the indices relative to that run. Within a primitive a shared vertex is
-stored once (the run is compacted to only the vertices actually referenced), so `positions.size()` is
-far below `3 * triangleCount` for indexed meshes. `Primitive::vertexBase`/`vertexCount` record the
-window; `Primitive::firstTriangle` is an ordinal into `indices`.
+Triangle indices are local to a primitive's vertex window. Import, GPU traversal and raster
+geometry lookup share this addressing convention. Compact windows let the renderer use the same
+geometry for shading and [acceleration structures](gpu-resources.md#acceleration-structures).
 
-The window is not just bookkeeping — it is required. The acceleration-structure backend derives a
-primitive's triangle count from its vertex and index counts
-(see [AS constraints](gpu-resources.md#acceleration-structures)), so a primitive must not reference vertices outside
-its own triangles.
+Instancing keeps geometry independent of placement. Position and normal transforms preserve
+that distinction when a renderer resolves a world-space surface.
 
-**Transforms.** `addInstance` stores three explicit object-to-world rows and three inverse-transpose
-rows for normals, avoiding dependence on host and shader matrix storage conventions.
+## Materials and textures
 
-**Texture and sampler dedup.** `importMaterials` registers one `TextureData` per image/color-space
-pair (with its full mip chain) and one `TextureSampler` per distinct wrap/filter state. The same image
-used as both sRGB color and linear data gets separate texture entries. Materials name both by index, so
-the shader's bindless arrays are filled in exactly the order the importer registered them.
+Scene geometry stores attributes in separate arrays. Each material texture slot has its own UV
+stream because slots can select different glTF coordinate sets and texture transforms.
+
+Texture identity includes color space: an image used as both color and linear data needs separate
+texture entries. Sampler identity captures filtering and wrapping. Material records refer to these
+registered resources, and GPU upload preserves those associations.
+
+## Derived scene data
+
+Scene preparation derives bounds, world-space lights and their sampling distribution from geometry
+and instances. The [light-transport design](light-transport.md#light-sampling) explains how CPU light
+registration supports GPU shading. The architecture describes the
+[handoff to a GPU snapshot](../architecture.md#uploading-a-gpu-snapshot).
+
+## Code entry points
+
+| Source | What to look for |
+| --- | --- |
+| [scene.h](../../src/scene/scene.h) | CPU records, attribute arrays and scene interface |
+| [gltf_importer.cpp](../../src/scene/gltf_importer.cpp) | `buildPrimitive`, `importMaterials` and glTF scene derivation |
+| [scene.cpp](../../src/scene/scene.cpp) | Instance transforms, light registration and bounds |
+| [scene_json.cpp](../../src/scene/scene_json.cpp) | CPU inspection output |

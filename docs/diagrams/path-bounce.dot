@@ -5,16 +5,16 @@ digraph path_bounce {
   node [shape=box, style="rounded,filled", fillcolor="#e8f1fb", color="#94a3b8",
         fontcolor="#17283b", fontname="Arial", fontsize=13, margin="0.16,0.09"];
   edge [color="#60758a", fontcolor="#334e68", fontname="Arial", fontsize=11, arrowsize=0.7];
-  start [label="Camera ray + RNG\nradiance = 0, throughput = 1"];
-  query [label="traceScene(): hardware ray query\nHit a surface in the TLAS?"];
-  surface [label="surfaceAt(): resolve the surface\nAttributes / textures / normals / material / ray cone"];
-  emission [label="Apply segment absorption and interface IORs\nCollect emission with MIS weighting when needed"];
+  start [label="Camera sample\nBegin a path with no collected radiance"];
+  query [label="Hardware ray query\ntraceScene(): does the path hit a surface?"];
+  surface [label="Shared surface evaluation\nsurfaceAt(): geometry and material"];
+  emission [label="Account for medium absorption and interfaces\nCollect material emission with MIS weighting"];
   nee [label="If NEE is enabled and lights are sampleable\nSelect light → shadow ray → evaluate BSDF\nCollect visible direct light (MIS for area lights)"];
-  bsdf [label="sampleBsdf(): choose the next direction\nInvalid direction / zero weight / failed medium crossing ends the path"];
-  state [label="Valid path: update medium and throughput\nRecord PDF / NEE state, offset the origin\nUpdate the ray cone"];
-  stop [label="Russian roulette at bounce >= 3\nCompensate survivors; below the depth limit?"];
-  miss [label="Miss: collect environment light\nradiance += throughput × environment", fillcolor="#edf5ed"];
-  result [label="Return radiance to traceMain()\nAdd this sample to Film: float4(radiance, 1)", fillcolor="#edf5ed"];
+  bsdf [label="Choose reflection or transmission\nsampleBsdf(): continue with a valid path"];
+  state [label="Update the path state\nTrack volume boundary crossings\nUpdate scattering throughput"];
+  stop [label="Apply path termination\nRussian roulette and the depth limit bound work"];
+  miss [label="Miss: collect environment light\nWeight the contribution by path throughput", fillcolor="#edf5ed"];
+  result [label="Return the sample's radiance\nAccumulate the sample in Film", fillcolor="#edf5ed"];
   start -> query;
   query -> surface [label="Hit"];
   query -> miss [label="Miss"];

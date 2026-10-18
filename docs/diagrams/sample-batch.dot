@@ -5,16 +5,16 @@ digraph sample_batch {
   node [shape=box, style="rounded,filled", fillcolor="#f1f5f9", color="#94a3b8",
         fontcolor="#17283b", fontname="Arial", fontsize=13, margin="0.16,0.10"];
   edge [color="#60758a", fontcolor="#334e68", fontname="Arial", fontsize=11, arrowsize=0.7];
-  step [label="CPU  PathSession::renderStep()\nBelow target: choose this batch's SPP"];
-  params [label="CPU  Pack Params and bind resources\nSample base / batch count / camera / integrator\nGpuScene + current Film"];
-  dispatch [label="CPU  dispatchImage()\nbarrier → compute pass → dispatch\nSubmit and wait for the GPU"];
-  trace [label="GPU  traceMain()\nEach thread loops over batch samples\nEach sample calls tracePath()", fillcolor="#e8f1fb"];
+  step [label="CPU  Choose a sampling batch\nPathSession::renderStep()"];
+  params [label="CPU  Prepare rendering state\nCamera / integrator / sample range\nShared scene + session Film"];
+  dispatch [label="CPU  Submit compute work\nWait before advancing the sample count"];
+  trace [label="GPU  Trace camera samples\ntraceMain(): one thread per pixel\ntracePath(): one path per sample", fillcolor="#e8f1fb"];
   film [label="GPU  Film accumulation\nPer pixel: (radiance sum, count)", fillcolor="#e8f1fb"];
-  count [label="CPU  Wait completes; addSamples(batch)\nContinue sampling or use the current Film"];
-  window [label="GUI / GPU  Session::present()\nRead and scale accumulation\nTone map + target-dependent encoding", fillcolor="#edf5ed"];
-  export [label="Export / GPU  Session::readback()\ntonemapMain → display buffer", fillcolor="#edf5ed"];
-  screen [label="CPU  Draw UI + Window::present()\nDisplay without full-image CPU readback", fillcolor="#edf5ed"];
-  files [label="CPU  Film::readback() + saveImages()\nPNG: quantize display / HDR: linear mean", fillcolor="#edf5ed"];
+  count [label="CPU  Record completed samples\nContinue sampling or use the current Film"];
+  window [label="GUI / GPU  Fit Film to the window\nTone map + target-dependent encoding", fillcolor="#edf5ed"];
+  export [label="Export / GPU  Tone map Film\nPrepare the display buffer", fillcolor="#edf5ed"];
+  screen [label="CPU  Draw UI and present\nDisplay without full-image CPU readback", fillcolor="#edf5ed"];
+  files [label="CPU  Read back and write files\nPNG: tone-mapped display / HDR: linear mean", fillcolor="#edf5ed"];
   step -> params -> dispatch -> trace -> film -> count;
   count -> step [style=dashed, label="Next batch", constraint=false];
   count -> window [label="Window frame"];

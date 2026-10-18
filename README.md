@@ -78,20 +78,20 @@ are in [Usage](docs/usage.md).
 
 ## Documentation
 
-After your first run, read the
-[architecture](docs/architecture.md) from the system overview through scene preparation,
-rendering, output and state changes. Follow its topic links when you need implementation details.
-
-| Need | Read |
+| Path | Contents |
 | --- | --- |
-| Use the GUI, choose CLI options or reproduce the example image | [Usage](docs/usage.md) |
-| Understand the system and follow a scene to an image | [Architecture](docs/architecture.md) |
-| Change scene import or CPU representation | [Scene data](docs/reference/scene-data.md) |
-| Change shared layouts, GPU resources or bindings | [GPU resources](docs/reference/gpu-resources.md) |
-| Understand path tracing, materials, sampling or volumes | [Light transport](docs/reference/light-transport.md) |
-| Change Raster or window presentation | [Rasterizer](docs/reference/rasterizer.md) / [Presentation](docs/reference/presentation.md) |
-| Test renderer changes | [Renderer tests](tests/README.md) |
-| Modify the project with an AI agent | [Repository rules and workflow](AGENTS.md) |
+| [README.md](README.md) | Project overview, requirements, build and quick start |
+| [AGENTS.md](AGENTS.md) | Repository guidelines for dependencies, rendering references and documentation |
+| [docs/architecture.md](docs/architecture.md) | System overview, rendering flow, ownership, output, reset rules and code map |
+| [docs/usage.md](docs/usage.md) | Launch modes, interactive controls, CLI options and example image reproduction |
+| [docs/reference/scene-data.md](docs/reference/scene-data.md) | CPU scene representation, geometry, instances and imported resources |
+| [docs/reference/gpu-resources.md](docs/reference/gpu-resources.md) | Host/device contracts, GPU resources and binding design |
+| [docs/reference/light-transport.md](docs/reference/light-transport.md) | Shared material evaluation, path transport, lighting and volumes |
+| [docs/reference/rasterizer.md](docs/reference/rasterizer.md) | Raster rendering, transparency and preview approximations |
+| [docs/reference/presentation.md](docs/reference/presentation.md) | Display boundaries and window integration |
+| [docs/diagrams/README.md](docs/diagrams/README.md) | Diagram sources, generated SVGs and regeneration instructions |
+| [docs/images/](docs/images/) | Rendered example images |
+| [tests/README.md](tests/README.md) | Renderer smoke tests, integration tests and manual GUI regression checks |
 
 ## Roadmap
 
